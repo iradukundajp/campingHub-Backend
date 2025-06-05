@@ -1,0 +1,32 @@
+{
+  "watch": [
+    "app.js",
+    "bin/",
+    "routes/",
+    "middleware/",
+    "config/",
+    "utils/",
+    "prisma/schema.prisma"
+  ],
+  "ext": "js,json,prisma",
+  "ignore": [
+    "node_modules/",
+    "logs/",
+    "uploads/",
+    "coverage/",
+    "*.test.js",
+    "*.spec.js"
+  ],
+  "env": {
+    "NODE_ENV": "development",
+    "DEBUG": "campinghub-backend:*"
+  },
+  "delay": "1000",
+  "verbose": true,
+  "restartable": "rs",
+  "events": {
+    "start": "echo '🚀 CampingHub API Server starting...'",
+    "restart": "echo '🔄 CampingHub API Server restarting due to changes...'",
+    "crash": "echo '💥 CampingHub API Server crashed - waiting for file changes before restarting...'"
+  }
+}

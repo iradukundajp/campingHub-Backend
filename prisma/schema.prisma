@@ -1,15 +1,160 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
-  output   = "../generated/prisma"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
+}
+
+// User model - Handles authentication and user profiles
+model User {
+  id          Int      @id @default(autoincrement())
+  email       String   @unique
+  password    String
+  firstName   String
+  lastName    String
+  phone       String?
+  avatar      String?  // Profile image URL
+  role        Role     @default(USER)
+  isActive    Boolean  @default(true)
+  isVerified  Boolean  @default(false)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  ownedSpots  CampingSpot[] @relation("SpotOwner")
+  bookings    Booking[]
+  reviews     Review[]
+  
+  @@map("users")
+}
+
+// Camping Spot model - The main entity for campgrounds
+model CampingSpot {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String   @db.Text
+  location    String
+  address     String?
+  city        String?
+  state       String?
+  country     String?  @default("USA")
+  zipCode     String?
+  
+  // Geographic coordinates
+  latitude    Float?
+  longitude   Float?
+  
+  // Pricing and capacity
+  price       Decimal  @db.Decimal(10, 2)
+  capacity    Int
+  
+  // Features and amenities
+  amenities   Json?    // Store as JSON array
+  images      Json?    // Store image URLs as JSON array
+  rules       String?  @db.Text
+  
+  // Spot settings
+  isActive    Boolean  @default(true)
+  isInstantBook Boolean @default(false)
+  
+  // Owner information
+  ownerId     Int
+  owner       User     @relation("SpotOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  bookings    Booking[]
+  reviews     Review[]
+  
+  @@map("camping_spots")
+}
+
+// Booking model - Handles reservations
+model Booking {
+  id          Int           @id @default(autoincrement())
+  
+  // User and spot references
+  userId      Int
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  spotId      Int
+  spot        CampingSpot   @relation(fields: [spotId], references: [id], onDelete: Cascade)
+  
+  // Booking details
+  checkIn     DateTime
+  checkOut    DateTime
+  guests      Int
+  
+  // Pricing
+  totalPrice  Decimal       @db.Decimal(10, 2)
+  
+  // Status and payment
+  status      BookingStatus @default(PENDING)
+  paymentStatus PaymentStatus @default(PENDING)
+  
+  // Special requests or notes
+  notes       String?       @db.Text
+  
+  // Timestamps
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  
+  @@map("bookings")
+}
+
+// Review model - User reviews for camping spots
+model Review {
+  id          Int         @id @default(autoincrement())
+  
+  // User and spot references
+  userId      Int
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  spotId      Int
+  spot        CampingSpot @relation(fields: [spotId], references: [id], onDelete: Cascade)
+  
+  // Review content
+  rating      Int         // 1-5 stars
+  comment     String?     @db.Text
+  
+  // Review metadata
+  isVerified  Boolean     @default(false) // Only verified bookings can review
+  
+  // Timestamps
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  // Ensure one review per user per spot
+  @@unique([userId, spotId])
+  @@map("reviews")
+}
+
+// Enums
+enum Role {
+  USER
+  OWNER
+  ADMIN
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
 }

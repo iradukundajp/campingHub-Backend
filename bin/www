@@ -86,5 +86,9 @@ function onListening() {
   var bind = typeof addr === 'string'
     ? 'pipe ' + addr
     : 'port ' + addr.port;
+  
+  console.log('🚀 CampingHub API Server listening on ' + bind);
+  console.log('🌍 Environment: ' + process.env.NODE_ENV);
+  console.log('📊 Database: Connected');
   debug('Listening on ' + bind);
 }
