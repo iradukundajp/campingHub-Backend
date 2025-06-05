@@ -8,12 +8,12 @@ router.use(authenticateToken);
 /* POST /api/bookings - Create a new booking */
 router.post('/', async function(req, res, next) {
   try {
-    const { spotId, checkIn, checkOut, guests } = req.body;
+    const { spotId, checkIn, checkOut, guests, notes } = req.body;
 
     // Validation
     if (!spotId || !checkIn || !checkOut || !guests) {
       return res.status(400).json({
-        message: 'Required fields: spotId, checkIn, checkOut, guests'
+        message: 'All required fields must be provided: spotId, checkIn, checkOut, guests'
       });
     }
 
@@ -35,15 +35,33 @@ router.post('/', async function(req, res, next) {
       });
     }
 
-    if (guests <= 0) {
+    // Check booking duration (max 30 days)
+    const daysDiff = (checkOutDate - checkInDate) / (1000 * 60 * 60 * 24);
+    if (daysDiff > 30) {
       return res.status(400).json({
-        message: 'Number of guests must be greater than 0'
+        message: 'Maximum booking duration is 30 days'
+      });
+    }
+
+    if (guests <= 0 || guests > 50) {
+      return res.status(400).json({
+        message: 'Number of guests must be between 1 and 50'
       });
     }
 
     // Check if camping spot exists and is active
     const spot = await req.prisma.campingSpot.findUnique({
-      where: { id: parseInt(spotId) }
+      where: { id: parseInt(spotId) },
+      include: {
+        owner: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true
+          }
+        }
+      }
     });
 
     if (!spot) {
@@ -64,11 +82,20 @@ router.post('/', async function(req, res, next) {
       });
     }
 
+    // Prevent users from booking their own spots
+    if (spot.ownerId === req.user.userId) {
+      return res.status(400).json({
+        message: 'You cannot book your own camping spot'
+      });
+    }
+
     // Check for conflicting bookings
     const conflictingBookings = await req.prisma.booking.findMany({
       where: {
         spotId: parseInt(spotId),
-        status: 'CONFIRMED',
+        status: {
+          in: ['CONFIRMED', 'PENDING']
+        },
         OR: [
           {
             AND: [
@@ -94,7 +121,7 @@ router.post('/', async function(req, res, next) {
 
     if (conflictingBookings.length > 0) {
       return res.status(409).json({
-        message: 'The selected dates are not available'
+        message: 'The selected dates are not available. Please choose different dates.'
       });
     }
 
@@ -111,7 +138,8 @@ router.post('/', async function(req, res, next) {
         checkOut: checkOutDate,
         guests: parseInt(guests),
         totalPrice: totalPrice,
-        status: 'CONFIRMED' // In a real app, this might be PENDING until payment
+        status: 'CONFIRMED',
+        notes: notes?.trim() || null
       },
       include: {
         spot: {
@@ -119,12 +147,12 @@ router.post('/', async function(req, res, next) {
             id: true,
             title: true,
             location: true,
-            price: true
+            price: true,
+            images: true
           }
         },
         user: {
           select: {
-            id: true,
             firstName: true,
             lastName: true,
             email: true
@@ -135,14 +163,21 @@ router.post('/', async function(req, res, next) {
 
     res.status(201).json({
       message: 'Booking created successfully',
-      booking
+      booking: {
+        ...booking,
+        spot: {
+          ...booking.spot,
+          images: booking.spot.images ? JSON.parse(booking.spot.images) : []
+        },
+        nights,
+        pricePerNight: parseFloat(spot.price)
+      }
     });
 
   } catch (error) {
     console.error('Error creating booking:', error);
     res.status(500).json({
-      message: 'Error creating booking',
-      error: error.message
+      message: 'Error creating booking'
     });
   }
 });
@@ -150,8 +185,19 @@ router.post('/', async function(req, res, next) {
 /* GET /api/bookings - Get user's bookings */
 router.get('/', async function(req, res, next) {
   try {
+    const { status } = req.query;
+
+    // Build where clause
+    const where = { userId: req.user.userId };
+    if (status) {
+      const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'];
+      if (validStatuses.includes(status.toUpperCase())) {
+        where.status = status.toUpperCase();
+      }
+    }
+
     const bookings = await req.prisma.booking.findMany({
-      where: { userId: req.user.userId },
+      where,
       include: {
         spot: {
           select: {
@@ -168,16 +214,33 @@ router.get('/', async function(req, res, next) {
       }
     });
 
+    // Parse JSON fields and add computed fields
+    const bookingsWithExtras = bookings.map(booking => {
+      const checkIn = new Date(booking.checkIn);
+      const checkOut = new Date(booking.checkOut);
+      const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+      
+      return {
+        ...booking,
+        spot: {
+          ...booking.spot,
+          images: booking.spot.images ? JSON.parse(booking.spot.images) : []
+        },
+        nights,
+        pricePerNight: booking.totalPrice / nights,
+        canCancel: canCancelBooking(booking)
+      };
+    });
+
     res.json({
-      bookings,
-      total: bookings.length
+      message: 'Bookings retrieved successfully',
+      bookings: bookingsWithExtras
     });
 
   } catch (error) {
     console.error('Error fetching bookings:', error);
     res.status(500).json({
-      message: 'Error fetching bookings',
-      error: error.message
+      message: 'Error fetching bookings'
     });
   }
 });
@@ -186,6 +249,12 @@ router.get('/', async function(req, res, next) {
 router.get('/:id', async function(req, res, next) {
   try {
     const bookingId = parseInt(req.params.id);
+    
+    if (isNaN(bookingId)) {
+      return res.status(400).json({
+        message: 'Invalid booking ID'
+      });
+    }
     
     const booking = await req.prisma.booking.findFirst({
       where: {
@@ -213,13 +282,32 @@ router.get('/:id', async function(req, res, next) {
       });
     }
 
-    res.json({ booking });
+    // Parse JSON fields and add computed data
+    const checkIn = new Date(booking.checkIn);
+    const checkOut = new Date(booking.checkOut);
+    const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+
+    const enrichedBooking = {
+      ...booking,
+      spot: {
+        ...booking.spot,
+        images: booking.spot.images ? JSON.parse(booking.spot.images) : [],
+        amenities: booking.spot.amenities ? JSON.parse(booking.spot.amenities) : []
+      },
+      nights,
+      pricePerNight: booking.totalPrice / nights,
+      canCancel: canCancelBooking(booking)
+    };
+
+    res.json({ 
+      message: 'Booking retrieved successfully',
+      booking: enrichedBooking 
+    });
 
   } catch (error) {
     console.error('Error fetching booking:', error);
     res.status(500).json({
-      message: 'Error fetching booking',
-      error: error.message
+      message: 'Error fetching booking'
     });
   }
 });
@@ -228,6 +316,13 @@ router.get('/:id', async function(req, res, next) {
 router.put('/:id/cancel', async function(req, res, next) {
   try {
     const bookingId = parseInt(req.params.id);
+    const { reason } = req.body;
+    
+    if (isNaN(bookingId)) {
+      return res.status(400).json({
+        message: 'Invalid booking ID'
+      });
+    }
     
     const booking = await req.prisma.booking.findFirst({
       where: {
@@ -254,13 +349,8 @@ router.put('/:id/cancel', async function(req, res, next) {
       });
     }
 
-    // Check if booking can still be cancelled (e.g., not too close to check-in)
-    const checkInDate = new Date(booking.checkIn);
-    const now = new Date();
-    const timeDiff = checkInDate - now;
-    const hoursDiff = timeDiff / (1000 * 60 * 60);
-
-    if (hoursDiff < 24) { // 24 hours cancellation policy
+    // Check if booking can still be cancelled
+    if (!canCancelBooking(booking)) {
       return res.status(400).json({
         message: 'Bookings can only be cancelled at least 24 hours before check-in'
       });
@@ -268,15 +358,10 @@ router.put('/:id/cancel', async function(req, res, next) {
 
     const updatedBooking = await req.prisma.booking.update({
       where: { id: bookingId },
-      data: { status: 'CANCELLED' },
-      include: {
-        spot: {
-          select: {
-            id: true,
-            title: true,
-            location: true
-          }
-        }
+      data: { 
+        status: 'CANCELLED',
+        notes: reason ? `Cancelled: ${reason}` : booking.notes,
+        updatedAt: new Date()
       }
     });
 
@@ -288,8 +373,7 @@ router.put('/:id/cancel', async function(req, res, next) {
   } catch (error) {
     console.error('Error cancelling booking:', error);
     res.status(500).json({
-      message: 'Error cancelling booking',
-      error: error.message
+      message: 'Error cancelling booking'
     });
   }
 });
@@ -300,9 +384,16 @@ router.post('/:id/review', async function(req, res, next) {
     const bookingId = parseInt(req.params.id);
     const { rating, comment } = req.body;
 
-    if (!rating || rating < 1 || rating > 5) {
+    if (isNaN(bookingId)) {
       return res.status(400).json({
-        message: 'Rating is required and must be between 1 and 5'
+        message: 'Invalid booking ID'
+      });
+    }
+
+    // Validate rating
+    if (!rating || rating < 1 || rating > 5 || !Number.isInteger(Number(rating))) {
+      return res.status(400).json({
+        message: 'Rating is required and must be an integer between 1 and 5'
       });
     }
 
@@ -339,20 +430,14 @@ router.post('/:id/review', async function(req, res, next) {
       });
     }
 
+    // Create review
     const review = await req.prisma.review.create({
       data: {
         userId: req.user.userId,
         spotId: booking.spotId,
         rating: parseInt(rating),
-        comment: comment || null
-      },
-      include: {
-        spot: {
-          select: {
-            id: true,
-            title: true
-          }
-        }
+        comment: comment?.trim() || null,
+        isVerified: true
       }
     });
 
@@ -364,10 +449,19 @@ router.post('/:id/review', async function(req, res, next) {
   } catch (error) {
     console.error('Error adding review:', error);
     res.status(500).json({
-      message: 'Error adding review',
-      error: error.message
+      message: 'Error adding review'
     });
   }
 });
+
+// Helper function to check if booking can be cancelled
+function canCancelBooking(booking, hoursBeforeCheckIn = 24) {
+  const checkInDate = new Date(booking.checkIn);
+  const now = new Date();
+  const hoursUntilCheckIn = (checkInDate - now) / (1000 * 60 * 60);
+  
+  return hoursUntilCheckIn >= hoursBeforeCheckIn && 
+         !['CANCELLED', 'COMPLETED'].includes(booking.status);
+}
 
 module.exports = router;

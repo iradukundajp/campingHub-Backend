@@ -13,24 +13,8 @@ router.get('/spots', async function(req, res, next) {
       where: { ownerId: req.user.userId },
       include: {
         reviews: {
-          include: {
-            user: {
-              select: {
-                firstName: true,
-                lastName: true
-              }
-            }
-          }
-        },
-        bookings: {
-          include: {
-            user: {
-              select: {
-                firstName: true,
-                lastName: true,
-                email: true
-              }
-            }
+          select: {
+            rating: true
           }
         },
         _count: {
@@ -53,6 +37,8 @@ router.get('/spots', async function(req, res, next) {
       
       return {
         ...spot,
+        images: spot.images ? JSON.parse(spot.images) : [],
+        amenities: spot.amenities ? JSON.parse(spot.amenities) : [],
         averageRating: Math.round(avgRating * 10) / 10,
         totalReviews: spot.reviews.length,
         totalBookings: spot._count.bookings
@@ -60,15 +46,14 @@ router.get('/spots', async function(req, res, next) {
     });
 
     res.json({
-      spots: spotsWithStats,
-      total: spotsWithStats.length
+      message: 'Spots retrieved successfully',
+      spots: spotsWithStats
     });
 
   } catch (error) {
     console.error('Error fetching owner spots:', error);
     res.status(500).json({
-      message: 'Error fetching your camping spots',
-      error: error.message
+      message: 'Error fetching your camping spots'
     });
   }
 });
@@ -108,9 +93,9 @@ router.post('/spots', async function(req, res, next) {
     }
 
     const spotData = {
-      title,
-      description,
-      location,
+      title: title.trim(),
+      description: description.trim(),
+      location: location.trim(),
       price: parseFloat(price),
       capacity: parseInt(capacity),
       ownerId: req.user.userId
@@ -118,10 +103,10 @@ router.post('/spots', async function(req, res, next) {
 
     // Add optional fields if provided
     if (amenities) {
-      spotData.amenities = typeof amenities === 'string' ? amenities : JSON.stringify(amenities);
+      spotData.amenities = Array.isArray(amenities) ? JSON.stringify(amenities) : amenities;
     }
     if (images) {
-      spotData.images = typeof images === 'string' ? images : JSON.stringify(images);
+      spotData.images = Array.isArray(images) ? JSON.stringify(images) : images;
     }
     if (latitude) spotData.latitude = parseFloat(latitude);
     if (longitude) spotData.longitude = parseFloat(longitude);
@@ -141,14 +126,17 @@ router.post('/spots', async function(req, res, next) {
 
     res.status(201).json({
       message: 'Camping spot created successfully',
-      spot: newSpot
+      spot: {
+        ...newSpot,
+        images: newSpot.images ? JSON.parse(newSpot.images) : [],
+        amenities: newSpot.amenities ? JSON.parse(newSpot.amenities) : []
+      }
     });
 
   } catch (error) {
     console.error('Error creating camping spot:', error);
     res.status(500).json({
-      message: 'Error creating camping spot',
-      error: error.message
+      message: 'Error creating camping spot'
     });
   }
 });
@@ -158,6 +146,12 @@ router.put('/spots/:id', async function(req, res, next) {
   try {
     const spotId = parseInt(req.params.id);
     
+    if (isNaN(spotId)) {
+      return res.status(400).json({
+        message: 'Invalid spot ID'
+      });
+    }
+
     // Check if spot exists and belongs to the owner
     const existingSpot = await req.prisma.campingSpot.findFirst({
       where: {
@@ -188,9 +182,10 @@ router.put('/spots/:id', async function(req, res, next) {
     const updateData = {};
 
     // Only update provided fields
-    if (title) updateData.title = title;
-    if (description) updateData.description = description;
-    if (location) updateData.location = location;
+    if (title) updateData.title = title.trim();
+    if (description) updateData.description = description.trim();
+    if (location) updateData.location = location.trim();
+    
     if (price !== undefined) {
       if (price <= 0) {
         return res.status(400).json({
@@ -199,6 +194,7 @@ router.put('/spots/:id', async function(req, res, next) {
       }
       updateData.price = parseFloat(price);
     }
+    
     if (capacity !== undefined) {
       if (capacity <= 0) {
         return res.status(400).json({
@@ -207,11 +203,12 @@ router.put('/spots/:id', async function(req, res, next) {
       }
       updateData.capacity = parseInt(capacity);
     }
+    
     if (amenities !== undefined) {
-      updateData.amenities = typeof amenities === 'string' ? amenities : JSON.stringify(amenities);
+      updateData.amenities = Array.isArray(amenities) ? JSON.stringify(amenities) : amenities;
     }
     if (images !== undefined) {
-      updateData.images = typeof images === 'string' ? images : JSON.stringify(images);
+      updateData.images = Array.isArray(images) ? JSON.stringify(images) : images;
     }
     if (latitude !== undefined) updateData.latitude = parseFloat(latitude);
     if (longitude !== undefined) updateData.longitude = parseFloat(longitude);
@@ -223,30 +220,26 @@ router.put('/spots/:id', async function(req, res, next) {
       });
     }
 
+    updateData.updatedAt = new Date();
+
     const updatedSpot = await req.prisma.campingSpot.update({
       where: { id: spotId },
-      data: updateData,
-      include: {
-        owner: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true
-          }
-        }
-      }
+      data: updateData
     });
 
     res.json({
       message: 'Camping spot updated successfully',
-      spot: updatedSpot
+      spot: {
+        ...updatedSpot,
+        images: updatedSpot.images ? JSON.parse(updatedSpot.images) : [],
+        amenities: updatedSpot.amenities ? JSON.parse(updatedSpot.amenities) : []
+      }
     });
 
   } catch (error) {
     console.error('Error updating camping spot:', error);
     res.status(500).json({
-      message: 'Error updating camping spot',
-      error: error.message
+      message: 'Error updating camping spot'
     });
   }
 });
@@ -256,6 +249,12 @@ router.delete('/spots/:id', async function(req, res, next) {
   try {
     const spotId = parseInt(req.params.id);
     
+    if (isNaN(spotId)) {
+      return res.status(400).json({
+        message: 'Invalid spot ID'
+      });
+    }
+
     // Check if spot exists and belongs to the owner
     const existingSpot = await req.prisma.campingSpot.findFirst({
       where: {
@@ -298,8 +297,7 @@ router.delete('/spots/:id', async function(req, res, next) {
   } catch (error) {
     console.error('Error deleting camping spot:', error);
     res.status(500).json({
-      message: 'Error deleting camping spot',
-      error: error.message
+      message: 'Error deleting camping spot'
     });
   }
 });
@@ -336,15 +334,14 @@ router.get('/bookings', async function(req, res, next) {
     });
 
     res.json({
-      bookings,
-      total: bookings.length
+      message: 'Bookings retrieved successfully',
+      bookings
     });
 
   } catch (error) {
     console.error('Error fetching owner bookings:', error);
     res.status(500).json({
-      message: 'Error fetching bookings',
-      error: error.message
+      message: 'Error fetching bookings'
     });
   }
 });

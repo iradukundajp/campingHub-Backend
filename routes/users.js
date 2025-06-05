@@ -2,34 +2,26 @@ var express = require('express');
 var router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { authenticateToken } = require('../middleware/auth');
 
-// Middleware to verify JWT token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+// Simple validation helpers
+const validateEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const validatePassword = (password) => password && password.length >= 6;
 
-  if (!token) {
-    return res.status(401).json({ message: 'Access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ message: 'Invalid or expired token' });
+/* GET /api/users - API info */
+router.get('/', function(req, res, next) {
+  res.json({
+    message: 'CampingHub Users API',
+    version: '1.0.0',
+    endpoints: {
+      register: 'POST /api/users/register',
+      login: 'POST /api/users/login',
+      profile: 'GET /api/users/profile (requires auth)',
+      updateProfile: 'PUT /api/users/profile (requires auth)',
+      bookings: 'GET /api/users/bookings (requires auth)'
     }
-    req.user = user;
-    next();
   });
-};
-
-// Validation helper functions
-const validateEmail = (email) => {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
-};
-
-const validatePassword = (password) => {
-  return password && password.length >= 6;
-};
+});
 
 /* POST /api/users/register - User Registration */
 router.post('/register', async function(req, res, next) {
@@ -39,8 +31,7 @@ router.post('/register', async function(req, res, next) {
     // Validation
     if (!email || !password || !firstName || !lastName) {
       return res.status(400).json({
-        message: 'All fields are required',
-        required: ['email', 'password', 'firstName', 'lastName']
+        message: 'All required fields must be provided'
       });
     }
 
@@ -56,9 +47,18 @@ router.post('/register', async function(req, res, next) {
       });
     }
 
+    // Validate role
+    const validRoles = ['USER', 'OWNER', 'ADMIN'];
+    const userRole = role.toUpperCase();
+    if (!validRoles.includes(userRole)) {
+      return res.status(400).json({
+        message: 'Invalid role. Must be USER, OWNER, or ADMIN'
+      });
+    }
+
     // Check if user already exists
     const existingUser = await req.prisma.user.findUnique({
-      where: { email }
+      where: { email: email.toLowerCase() }
     });
 
     if (existingUser) {
@@ -68,17 +68,18 @@ router.post('/register', async function(req, res, next) {
     }
 
     // Hash password
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    const hashedPassword = await bcrypt.hash(password, 12);
 
     // Create user
     const user = await req.prisma.user.create({
       data: {
-        email,
+        email: email.toLowerCase(),
         password: hashedPassword,
-        firstName,
-        lastName,
-        role: role.toUpperCase()
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        role: userRole,
+        isActive: true,
+        isVerified: true
       },
       select: {
         id: true,
@@ -92,11 +93,7 @@ router.post('/register', async function(req, res, next) {
 
     // Generate JWT token
     const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email, 
-        role: user.role 
-      },
+      { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -110,8 +107,7 @@ router.post('/register', async function(req, res, next) {
   } catch (error) {
     console.error('Registration error:', error);
     res.status(500).json({
-      message: 'Error registering user',
-      error: error.message
+      message: 'Error registering user'
     });
   }
 });
@@ -121,7 +117,6 @@ router.post('/login', async function(req, res, next) {
   try {
     const { email, password } = req.body;
 
-    // Validation
     if (!email || !password) {
       return res.status(400).json({
         message: 'Email and password are required'
@@ -130,7 +125,7 @@ router.post('/login', async function(req, res, next) {
 
     // Find user
     const user = await req.prisma.user.findUnique({
-      where: { email }
+      where: { email: email.toLowerCase() }
     });
 
     if (!user) {
@@ -150,11 +145,7 @@ router.post('/login', async function(req, res, next) {
 
     // Generate JWT token
     const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email, 
-        role: user.role 
-      },
+      { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -171,8 +162,7 @@ router.post('/login', async function(req, res, next) {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({
-      message: 'Error during login',
-      error: error.message
+      message: 'Error during login'
     });
   }
 });
@@ -189,7 +179,12 @@ router.get('/profile', authenticateToken, async function(req, res, next) {
         lastName: true,
         role: true,
         createdAt: true,
-        updatedAt: true
+        _count: {
+          select: {
+            bookings: true,
+            ownedSpots: true
+          }
+        }
       }
     });
 
@@ -199,13 +194,15 @@ router.get('/profile', authenticateToken, async function(req, res, next) {
       });
     }
 
-    res.json({ user });
+    res.json({ 
+      message: 'Profile retrieved successfully',
+      user 
+    });
 
   } catch (error) {
     console.error('Profile fetch error:', error);
     res.status(500).json({
-      message: 'Error fetching profile',
-      error: error.message
+      message: 'Error fetching profile'
     });
   }
 });
@@ -216,20 +213,36 @@ router.put('/profile', authenticateToken, async function(req, res, next) {
     const { firstName, lastName, email } = req.body;
     const updateData = {};
 
-    // Only update provided fields
-    if (firstName) updateData.firstName = firstName;
-    if (lastName) updateData.lastName = lastName;
-    if (email) {
+    // Validate and prepare update data
+    if (firstName !== undefined) {
+      if (!firstName || firstName.trim().length < 2) {
+        return res.status(400).json({
+          message: 'First name must be at least 2 characters long'
+        });
+      }
+      updateData.firstName = firstName.trim();
+    }
+
+    if (lastName !== undefined) {
+      if (!lastName || lastName.trim().length < 2) {
+        return res.status(400).json({
+          message: 'Last name must be at least 2 characters long'
+        });
+      }
+      updateData.lastName = lastName.trim();
+    }
+    
+    if (email !== undefined) {
       if (!validateEmail(email)) {
         return res.status(400).json({
           message: 'Please provide a valid email address'
         });
       }
       
-      // Check if email is already taken by another user
+      // Check if email is already taken
       const existingUser = await req.prisma.user.findFirst({
         where: {
-          email,
+          email: email.toLowerCase(),
           id: { not: req.user.userId }
         }
       });
@@ -240,7 +253,7 @@ router.put('/profile', authenticateToken, async function(req, res, next) {
         });
       }
       
-      updateData.email = email;
+      updateData.email = email.toLowerCase();
     }
 
     if (Object.keys(updateData).length === 0) {
@@ -248,6 +261,8 @@ router.put('/profile', authenticateToken, async function(req, res, next) {
         message: 'No valid fields provided for update'
       });
     }
+
+    updateData.updatedAt = new Date();
 
     const updatedUser = await req.prisma.user.update({
       where: { id: req.user.userId },
@@ -258,7 +273,6 @@ router.put('/profile', authenticateToken, async function(req, res, next) {
         firstName: true,
         lastName: true,
         role: true,
-        createdAt: true,
         updatedAt: true
       }
     });
@@ -271,62 +285,7 @@ router.put('/profile', authenticateToken, async function(req, res, next) {
   } catch (error) {
     console.error('Profile update error:', error);
     res.status(500).json({
-      message: 'Error updating profile',
-      error: error.message
-    });
-  }
-});
-
-/* PUT /api/users/change-password - Change Password */
-router.put('/change-password', authenticateToken, async function(req, res, next) {
-  try {
-    const { currentPassword, newPassword } = req.body;
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({
-        message: 'Current password and new password are required'
-      });
-    }
-
-    if (!validatePassword(newPassword)) {
-      return res.status(400).json({
-        message: 'New password must be at least 6 characters long'
-      });
-    }
-
-    // Get user with password
-    const user = await req.prisma.user.findUnique({
-      where: { id: req.user.userId }
-    });
-
-    // Verify current password
-    const isValidPassword = await bcrypt.compare(currentPassword, user.password);
-
-    if (!isValidPassword) {
-      return res.status(401).json({
-        message: 'Current password is incorrect'
-      });
-    }
-
-    // Hash new password
-    const saltRounds = 12;
-    const hashedNewPassword = await bcrypt.hash(newPassword, saltRounds);
-
-    // Update password
-    await req.prisma.user.update({
-      where: { id: req.user.userId },
-      data: { password: hashedNewPassword }
-    });
-
-    res.json({
-      message: 'Password changed successfully'
-    });
-
-  } catch (error) {
-    console.error('Password change error:', error);
-    res.status(500).json({
-      message: 'Error changing password',
-      error: error.message
+      message: 'Error updating profile'
     });
   }
 });
@@ -352,36 +311,28 @@ router.get('/bookings', authenticateToken, async function(req, res, next) {
       }
     });
 
-    res.json({ bookings });
+    // Parse JSON fields
+    const bookingsWithParsedData = bookings.map(booking => ({
+      ...booking,
+      spot: {
+        ...booking.spot,
+        images: booking.spot.images ? 
+          (typeof booking.spot.images === 'string' ? 
+            JSON.parse(booking.spot.images) : booking.spot.images) : []
+      }
+    }));
+
+    res.json({ 
+      message: 'Bookings retrieved successfully',
+      bookings: bookingsWithParsedData
+    });
 
   } catch (error) {
     console.error('Bookings fetch error:', error);
     res.status(500).json({
-      message: 'Error fetching bookings',
-      error: error.message
+      message: 'Error fetching bookings'
     });
   }
-});
-
-/* POST /api/users/logout - Logout (client-side token removal) */
-router.post('/logout', authenticateToken, function(req, res, next) {
-  // Since we're using stateless JWT, logout is handled client-side
-  // by removing the token. This endpoint confirms the action.
-  res.json({
-    message: 'Logout successful'
-  });
-});
-
-/* GET /api/users/verify-token - Verify if token is valid */
-router.get('/verify-token', authenticateToken, function(req, res, next) {
-  res.json({
-    valid: true,
-    user: {
-      userId: req.user.userId,
-      email: req.user.email,
-      role: req.user.role
-    }
-  });
 });
 
 module.exports = router;

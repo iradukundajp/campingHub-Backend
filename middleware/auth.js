@@ -20,7 +20,7 @@ const authenticateToken = (req, res, next) => {
 
 // Middleware to check if user is an owner
 const requireOwner = (req, res, next) => {
-  if (req.user.role !== 'OWNER' && req.user.role !== 'ADMIN') {
+  if (req.user.role !== 'OWNER') {
     return res.status(403).json({ 
       message: 'Access denied. Owner privileges required.' 
     });
@@ -28,7 +28,7 @@ const requireOwner = (req, res, next) => {
   next();
 };
 
-// Middleware to check if user is admin
+// Middleware to check if user is an admin
 const requireAdmin = (req, res, next) => {
   if (req.user.role !== 'ADMIN') {
     return res.status(403).json({ 

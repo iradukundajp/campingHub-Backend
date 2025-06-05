@@ -1,28 +1,26 @@
 var express = require('express');
 var router = express.Router();
-const { authenticateToken, requireAdmin } = require('../middleware/auth');
-const { validateSearchParams } = require('../middleware/validation');
-const { getPaginationParams, formatPaginatedResponse } = require('../utils/helpers');
-const { logger } = require('../middleware/logger');
+const { authenticateToken } = require('../middleware/auth');
 
-// Apply authentication and admin check to all routes
+// Middleware to check if user is an admin
+const requireAdmin = (req, res, next) => {
+  if (req.user.role !== 'ADMIN') {
+    return res.status(403).json({ 
+      message: 'Access denied. Admin privileges required.' 
+    });
+  }
+  next();
+};
+
+// Apply authentication and admin check to all admin routes
 router.use(authenticateToken);
 router.use(requireAdmin);
 
-/* GET /api/admin/dashboard - Admin dashboard statistics */
+/* GET /api/admin/dashboard - Admin Dashboard Stats */
 router.get('/dashboard', async function(req, res, next) {
   try {
-    // Get various statistics
-    const [
-      totalUsers,
-      totalOwners,
-      totalSpots,
-      activeSpots,
-      totalBookings,
-      totalRevenue,
-      recentUsers,
-      recentBookings
-    ] = await Promise.all([
+    // Get overview statistics
+    const [userCount, ownerCount, spotCount, activeSpotCount, bookingCount, totalRevenue] = await Promise.all([
       req.prisma.user.count({ where: { role: 'USER' } }),
       req.prisma.user.count({ where: { role: 'OWNER' } }),
       req.prisma.campingSpot.count(),
@@ -30,110 +28,91 @@ router.get('/dashboard', async function(req, res, next) {
       req.prisma.booking.count(),
       req.prisma.booking.aggregate({
         _sum: { totalPrice: true },
-        where: { status: 'COMPLETED' }
-      }),
-      req.prisma.user.findMany({
-        take: 5,
-        orderBy: { createdAt: 'desc' },
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
-          role: true,
-          createdAt: true
-        }
-      }),
-      req.prisma.booking.findMany({
-        take: 5,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          user: {
-            select: {
-              firstName: true,
-              lastName: true,
-              email: true
-            }
-          },
-          spot: {
-            select: {
-              title: true,
-              location: true
-            }
-          }
-        }
+        where: { status: 'CONFIRMED' }
       })
     ]);
 
-    // Calculate monthly statistics for the last 6 months
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-
-    const monthlyStats = await req.prisma.booking.groupBy({
-      by: ['createdAt'],
-      where: {
-        createdAt: {
-          gte: sixMonthsAgo
-        }
-      },
-      _count: {
-        id: true
-      },
-      _sum: {
-        totalPrice: true
+    // Get recent users (last 5)
+    const recentUsers = await req.prisma.user.findMany({
+      take: 5,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        createdAt: true
       }
     });
 
-    const dashboard = {
-      overview: {
-        totalUsers,
-        totalOwners,
-        totalSpots,
-        activeSpots,
-        totalBookings,
-        totalRevenue: totalRevenue._sum.totalPrice || 0
-      },
-      recentActivity: {
-        recentUsers,
-        recentBookings
-      },
-      monthlyStats
-    };
-
-    logger.info('Admin dashboard accessed', { adminId: req.user.userId });
+    // Get recent bookings (last 5)
+    const recentBookings = await req.prisma.booking.findMany({
+      take: 5,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: {
+          select: { firstName: true, lastName: true, email: true }
+        },
+        spot: {
+          select: { title: true, location: true }
+        }
+      }
+    });
 
     res.json({
       message: 'Dashboard data retrieved successfully',
-      dashboard
+      dashboard: {
+        overview: {
+          totalUsers: userCount,
+          totalOwners: ownerCount,
+          totalSpots: spotCount,
+          activeSpots: activeSpotCount,
+          totalBookings: bookingCount,
+          totalRevenue: totalRevenue._sum.totalPrice || 0
+        },
+        recentActivity: {
+          recentUsers,
+          recentBookings
+        }
+      }
     });
 
   } catch (error) {
-    console.error('Error fetching dashboard data:', error);
+    console.error('Admin dashboard error:', error);
     res.status(500).json({
-      message: 'Error fetching dashboard data',
-      error: error.message
+      message: 'Error fetching dashboard data'
     });
   }
 });
 
-/* GET /api/admin/users - Get all users with pagination and search */
-router.get('/users', validateSearchParams, async function(req, res, next) {
+/* GET /api/admin/users - Get all users with search and pagination */
+router.get('/users', async function(req, res, next) {
   try {
-    const { search, role, page = 1, limit = 20 } = req.query;
-    const { skip, take } = getPaginationParams(page, limit);
+    const { 
+      search, 
+      role, 
+      page = 1, 
+      limit = 20 
+    } = req.query;
 
-    // Build where clause
+    // Pagination
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+
+    // Build filter
     const where = {};
     
     if (search) {
       where.OR = [
+        { email: { contains: search, mode: 'insensitive' } },
         { firstName: { contains: search, mode: 'insensitive' } },
-        { lastName: { contains: search, mode: 'insensitive' } },
-        { email: { contains: search, mode: 'insensitive' } }
+        { lastName: { contains: search, mode: 'insensitive' } }
       ];
     }
 
-    if (role) {
+    if (role && ['USER', 'OWNER', 'ADMIN'].includes(role.toUpperCase())) {
       where.role = role.toUpperCase();
     }
 
@@ -141,57 +120,102 @@ router.get('/users', validateSearchParams, async function(req, res, next) {
       req.prisma.user.findMany({
         where,
         skip,
-        take,
+        take: limitNum,
+        orderBy: { createdAt: 'desc' },
         select: {
           id: true,
           email: true,
           firstName: true,
           lastName: true,
-          phone: true,
           role: true,
           isActive: true,
           isVerified: true,
           createdAt: true,
           _count: {
             select: {
-              ownedSpots: true,
               bookings: true,
+              ownedSpots: true,
               reviews: true
             }
           }
-        },
-        orderBy: { createdAt: 'desc' }
+        }
       }),
       req.prisma.user.count({ where })
     ]);
 
-    res.json(formatPaginatedResponse(users, total, page, limit));
+    res.json({
+      message: 'Users retrieved successfully',
+      users,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum < Math.ceil(total / limitNum),
+        hasPrev: pageNum > 1
+      }
+    });
 
   } catch (error) {
-    console.error('Error fetching users:', error);
+    console.error('Admin users fetch error:', error);
     res.status(500).json({
-      message: 'Error fetching users',
-      error: error.message
+      message: 'Error fetching users'
     });
   }
 });
 
-/* PUT /api/admin/users/:id - Update user status or role */
+/* PUT /api/admin/users/:id - Update user status/role */
 router.put('/users/:id', async function(req, res, next) {
   try {
     const userId = parseInt(req.params.id);
     const { isActive, role, isVerified } = req.body;
 
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        message: 'Invalid user ID'
+      });
+    }
+
+    // Check if user exists
+    const existingUser = await req.prisma.user.findUnique({
+      where: { id: userId }
+    });
+
+    if (!existingUser) {
+      return res.status(404).json({
+        message: 'User not found'
+      });
+    }
+
+    // Prevent admin from deactivating themselves
+    if (userId === req.user.userId && isActive === false) {
+      return res.status(400).json({
+        message: 'You cannot deactivate your own account'
+      });
+    }
+
+    // Build update data
     const updateData = {};
     if (isActive !== undefined) updateData.isActive = Boolean(isActive);
-    if (role !== undefined) updateData.role = role.toUpperCase();
     if (isVerified !== undefined) updateData.isVerified = Boolean(isVerified);
+    
+    if (role !== undefined) {
+      const validRoles = ['USER', 'OWNER', 'ADMIN'];
+      if (!validRoles.includes(role.toUpperCase())) {
+        return res.status(400).json({
+          message: 'Invalid role. Must be USER, OWNER, or ADMIN'
+        });
+      }
+      updateData.role = role.toUpperCase();
+    }
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({
         message: 'No valid fields provided for update'
       });
     }
+
+    updateData.updatedAt = new Date();
 
     const updatedUser = await req.prisma.user.update({
       where: { id: userId },
@@ -203,14 +227,9 @@ router.put('/users/:id', async function(req, res, next) {
         lastName: true,
         role: true,
         isActive: true,
-        isVerified: true
+        isVerified: true,
+        updatedAt: true
       }
-    });
-
-    logger.info('User updated by admin', {
-      adminId: req.user.userId,
-      updatedUserId: userId,
-      changes: updateData
     });
 
     res.json({
@@ -219,38 +238,49 @@ router.put('/users/:id', async function(req, res, next) {
     });
 
   } catch (error) {
-    console.error('Error updating user:', error);
+    console.error('Admin user update error:', error);
     res.status(500).json({
-      message: 'Error updating user',
-      error: error.message
+      message: 'Error updating user'
     });
   }
 });
 
 /* GET /api/admin/spots - Get all camping spots */
-router.get('/spots', validateSearchParams, async function(req, res, next) {
+router.get('/spots', async function(req, res, next) {
   try {
-    const { search, location, page = 1, limit = 20 } = req.query;
-    const { skip, take } = getPaginationParams(page, limit);
+    const { 
+      search, 
+      isActive,
+      page = 1, 
+      limit = 20 
+    } = req.query;
 
+    // Pagination
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+
+    // Build filter
     const where = {};
     
     if (search) {
       where.OR = [
         { title: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } }
+        { description: { contains: search, mode: 'insensitive' } },
+        { location: { contains: search, mode: 'insensitive' } }
       ];
     }
 
-    if (location) {
-      where.location = { contains: location, mode: 'insensitive' };
+    if (isActive !== undefined) {
+      where.isActive = isActive === 'true';
     }
 
     const [spots, total] = await Promise.all([
       req.prisma.campingSpot.findMany({
         where,
         skip,
-        take,
+        take: limitNum,
+        orderBy: { createdAt: 'desc' },
         include: {
           owner: {
             select: {
@@ -266,38 +296,70 @@ router.get('/spots', validateSearchParams, async function(req, res, next) {
               reviews: true
             }
           }
-        },
-        orderBy: { createdAt: 'desc' }
+        }
       }),
       req.prisma.campingSpot.count({ where })
     ]);
 
-    res.json(formatPaginatedResponse(spots, total, page, limit));
+    // Process spots
+    const processedSpots = spots.map(spot => ({
+      ...spot,
+      images: spot.images ? JSON.parse(spot.images) : [],
+      amenities: spot.amenities ? JSON.parse(spot.amenities) : [],
+      totalBookings: spot._count.bookings,
+      totalReviews: spot._count.reviews
+    }));
+
+    res.json({
+      message: 'Camping spots retrieved successfully',
+      spots: processedSpots,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum < Math.ceil(total / limitNum),
+        hasPrev: pageNum > 1
+      }
+    });
 
   } catch (error) {
-    console.error('Error fetching spots:', error);
+    console.error('Admin spots fetch error:', error);
     res.status(500).json({
-      message: 'Error fetching camping spots',
-      error: error.message
+      message: 'Error fetching camping spots'
     });
   }
 });
 
-/* PUT /api/admin/spots/:id - Update camping spot status */
+/* PUT /api/admin/spots/:id - Update spot status */
 router.put('/spots/:id', async function(req, res, next) {
   try {
     const spotId = parseInt(req.params.id);
     const { isActive } = req.body;
 
-    if (isActive === undefined) {
+    if (isNaN(spotId)) {
       return res.status(400).json({
-        message: 'isActive field is required'
+        message: 'Invalid spot ID'
+      });
+    }
+
+    // Check if spot exists
+    const existingSpot = await req.prisma.campingSpot.findUnique({
+      where: { id: spotId }
+    });
+
+    if (!existingSpot) {
+      return res.status(404).json({
+        message: 'Camping spot not found'
       });
     }
 
     const updatedSpot = await req.prisma.campingSpot.update({
       where: { id: spotId },
-      data: { isActive: Boolean(isActive) },
+      data: { 
+        isActive: Boolean(isActive),
+        updatedAt: new Date()
+      },
       include: {
         owner: {
           select: {
@@ -309,42 +371,53 @@ router.put('/spots/:id', async function(req, res, next) {
       }
     });
 
-    logger.info('Camping spot status updated by admin', {
-      adminId: req.user.userId,
-      spotId: spotId,
-      newStatus: isActive
-    });
-
     res.json({
       message: 'Camping spot updated successfully',
-      spot: updatedSpot
+      spot: {
+        ...updatedSpot,
+        images: updatedSpot.images ? JSON.parse(updatedSpot.images) : [],
+        amenities: updatedSpot.amenities ? JSON.parse(updatedSpot.amenities) : []
+      }
     });
 
   } catch (error) {
-    console.error('Error updating camping spot:', error);
+    console.error('Admin spot update error:', error);
     res.status(500).json({
-      message: 'Error updating camping spot',
-      error: error.message
+      message: 'Error updating camping spot'
     });
   }
 });
 
 /* GET /api/admin/bookings - Get all bookings */
-router.get('/bookings', validateSearchParams, async function(req, res, next) {
+router.get('/bookings', async function(req, res, next) {
   try {
-    const { status, page = 1, limit = 20 } = req.query;
-    const { skip, take } = getPaginationParams(page, limit);
+    const { 
+      status,
+      page = 1, 
+      limit = 20 
+    } = req.query;
 
+    // Pagination
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+
+    // Build filter
     const where = {};
+    
     if (status) {
-      where.status = status.toUpperCase();
+      const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'];
+      if (validStatuses.includes(status.toUpperCase())) {
+        where.status = status.toUpperCase();
+      }
     }
 
     const [bookings, total] = await Promise.all([
       req.prisma.booking.findMany({
         where,
         skip,
-        take,
+        take: limitNum,
+        orderBy: { createdAt: 'desc' },
         include: {
           user: {
             select: {
@@ -359,155 +432,81 @@ router.get('/bookings', validateSearchParams, async function(req, res, next) {
               id: true,
               title: true,
               location: true,
-              owner: {
-                select: {
-                  firstName: true,
-                  lastName: true,
-                  email: true
-                }
-              }
+              price: true
             }
           }
-        },
-        orderBy: { createdAt: 'desc' }
+        }
       }),
       req.prisma.booking.count({ where })
     ]);
 
-    res.json(formatPaginatedResponse(bookings, total, page, limit));
-
-  } catch (error) {
-    console.error('Error fetching bookings:', error);
-    res.status(500).json({
-      message: 'Error fetching bookings',
-      error: error.message
-    });
-  }
-});
-
-/* GET /api/admin/reports - Generate various reports */
-router.get('/reports', async function(req, res, next) {
-  try {
-    const { type, startDate, endDate } = req.query;
-
-    let where = {};
-    if (startDate && endDate) {
-      where.createdAt = {
-        gte: new Date(startDate),
-        lte: new Date(endDate)
-      };
-    }
-
-    let report = {};
-
-    switch (type) {
-      case 'revenue':
-        const revenueData = await req.prisma.booking.groupBy({
-          by: ['status'],
-          where: {
-            ...where,
-            status: 'COMPLETED'
-          },
-          _sum: {
-            totalPrice: true
-          },
-          _count: {
-            id: true
-          }
-        });
-        report = { type: 'revenue', data: revenueData };
-        break;
-
-      case 'users':
-        const userGrowth = await req.prisma.user.groupBy({
-          by: ['role'],
-          where,
-          _count: {
-            id: true
-          }
-        });
-        report = { type: 'users', data: userGrowth };
-        break;
-
-      case 'bookings':
-        const bookingStats = await req.prisma.booking.groupBy({
-          by: ['status'],
-          where,
-          _count: {
-            id: true
-          }
-        });
-        report = { type: 'bookings', data: bookingStats };
-        break;
-
-      default:
-        return res.status(400).json({
-          message: 'Invalid report type. Available types: revenue, users, bookings'
-        });
-    }
-
-    logger.info('Report generated by admin', {
-      adminId: req.user.userId,
-      reportType: type,
-      dateRange: { startDate, endDate }
-    });
-
     res.json({
-      message: 'Report generated successfully',
-      report
+      message: 'Bookings retrieved successfully',
+      bookings,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum < Math.ceil(total / limitNum),
+        hasPrev: pageNum > 1
+      }
     });
 
   } catch (error) {
-    console.error('Error generating report:', error);
+    console.error('Admin bookings fetch error:', error);
     res.status(500).json({
-      message: 'Error generating report',
-      error: error.message
+      message: 'Error fetching bookings'
     });
   }
 });
 
-/* DELETE /api/admin/users/:id - Delete user (soft delete) */
+/* DELETE /api/admin/users/:id - Delete user (soft delete by deactivating) */
 router.delete('/users/:id', async function(req, res, next) {
   try {
     const userId = parseInt(req.params.id);
 
-    // Check if user has active bookings
-    const activeBookings = await req.prisma.booking.count({
-      where: {
-        userId: userId,
-        status: 'CONFIRMED',
-        checkIn: {
-          gte: new Date()
-        }
-      }
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        message: 'Invalid user ID'
+      });
+    }
+
+    // Prevent admin from deleting themselves
+    if (userId === req.user.userId) {
+      return res.status(400).json({
+        message: 'You cannot delete your own account'
+      });
+    }
+
+    // Check if user exists
+    const existingUser = await req.prisma.user.findUnique({
+      where: { id: userId }
     });
 
-    if (activeBookings > 0) {
-      return res.status(400).json({
-        message: 'Cannot delete user with active bookings'
+    if (!existingUser) {
+      return res.status(404).json({
+        message: 'User not found'
       });
     }
 
     // Soft delete by deactivating the user
     await req.prisma.user.update({
       where: { id: userId },
-      data: { isActive: false }
-    });
-
-    logger.warn('User deleted by admin', {
-      adminId: req.user.userId,
-      deletedUserId: userId
+      data: { 
+        isActive: false,
+        updatedAt: new Date()
+      }
     });
 
     res.json({
-      message: 'User deleted successfully'
+      message: 'User deactivated successfully'
     });
 
   } catch (error) {
-    console.error('Error deleting user:', error);
+    console.error('Admin user delete error:', error);
     res.status(500).json({
-      message: 'Error deleting user',
-      error: error.message
+      message: 'Error deleting user'
     });
   }
 });
