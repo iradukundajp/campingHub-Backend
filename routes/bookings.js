@@ -10,17 +10,38 @@ router.post('/', async function(req, res, next) {
   try {
     const { spotId, checkIn, checkOut, guests, notes } = req.body;
 
-    // Validation
+    // Enhanced validation
     if (!spotId || !checkIn || !checkOut || !guests) {
       return res.status(400).json({
-        message: 'All required fields must be provided: spotId, checkIn, checkOut, guests'
+        message: 'All required fields must be provided: spotId, checkIn, checkOut, guests',
+        provided: { spotId: !!spotId, checkIn: !!checkIn, checkOut: !!checkOut, guests: !!guests }
       });
     }
 
-    const checkInDate = new Date(checkIn);
-    const checkOutDate = new Date(checkOut);
+    // Parse and validate dates with better error handling
+    let checkInDate, checkOutDate;
+    try {
+      checkInDate = new Date(checkIn);
+      checkOutDate = new Date(checkOut);
+      
+      // Check if dates are valid
+      if (isNaN(checkInDate.getTime()) || isNaN(checkOutDate.getTime())) {
+        return res.status(400).json({
+          message: 'Invalid date format. Please use YYYY-MM-DD format.'
+        });
+      }
+    } catch (error) {
+      return res.status(400).json({
+        message: 'Invalid date format. Please use YYYY-MM-DD format.'
+      });
+    }
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    
+    // Normalize check-in and check-out dates to avoid timezone issues
+    checkInDate.setHours(0, 0, 0, 0);
+    checkOutDate.setHours(0, 0, 0, 0);
 
     // Date validations
     if (checkInDate < today) {
@@ -43,15 +64,25 @@ router.post('/', async function(req, res, next) {
       });
     }
 
-    if (guests <= 0 || guests > 50) {
+    // Validate guests
+    const guestCount = parseInt(guests);
+    if (isNaN(guestCount) || guestCount <= 0 || guestCount > 50) {
       return res.status(400).json({
         message: 'Number of guests must be between 1 and 50'
       });
     }
 
+    // Validate spotId
+    const spotIdInt = parseInt(spotId);
+    if (isNaN(spotIdInt)) {
+      return res.status(400).json({
+        message: 'Invalid spot ID'
+      });
+    }
+
     // Check if camping spot exists and is active
     const spot = await req.prisma.campingSpot.findUnique({
-      where: { id: parseInt(spotId) },
+      where: { id: spotIdInt },
       include: {
         owner: {
           select: {
@@ -76,7 +107,7 @@ router.post('/', async function(req, res, next) {
       });
     }
 
-    if (guests > spot.capacity) {
+    if (guestCount > spot.capacity) {
       return res.status(400).json({
         message: `Maximum capacity for this spot is ${spot.capacity} guests`
       });
@@ -89,30 +120,40 @@ router.post('/', async function(req, res, next) {
       });
     }
 
-    // Check for conflicting bookings
+    // Enhanced conflict checking with better date handling
     const conflictingBookings = await req.prisma.booking.findMany({
       where: {
-        spotId: parseInt(spotId),
+        spotId: spotIdInt,
         status: {
           in: ['CONFIRMED', 'PENDING']
         },
         OR: [
+          // Existing booking starts before new booking and ends after new booking starts
           {
             AND: [
-              { checkIn: { lte: checkInDate } },
+              { checkIn: { lt: checkInDate } },
               { checkOut: { gt: checkInDate } }
             ]
           },
+          // Existing booking starts before new booking ends and ends after new booking ends
           {
             AND: [
               { checkIn: { lt: checkOutDate } },
-              { checkOut: { gte: checkOutDate } }
+              { checkOut: { gt: checkOutDate } }
             ]
           },
+          // Existing booking is completely within new booking
           {
             AND: [
               { checkIn: { gte: checkInDate } },
               { checkOut: { lte: checkOutDate } }
+            ]
+          },
+          // New booking is completely within existing booking
+          {
+            AND: [
+              { checkIn: { lte: checkInDate } },
+              { checkOut: { gte: checkOutDate } }
             ]
           }
         ]
@@ -121,45 +162,105 @@ router.post('/', async function(req, res, next) {
 
     if (conflictingBookings.length > 0) {
       return res.status(409).json({
-        message: 'The selected dates are not available. Please choose different dates.'
+        message: 'The selected dates are not available. Please choose different dates.',
+        conflictingDates: conflictingBookings.map(booking => ({
+          checkIn: booking.checkIn,
+          checkOut: booking.checkOut
+        }))
       });
     }
 
     // Calculate total price
     const nights = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
-    const totalPrice = nights * parseFloat(spot.price);
+    const pricePerNight = parseFloat(spot.price);
+    const totalPrice = nights * pricePerNight;
 
-    // Create booking
-    const booking = await req.prisma.booking.create({
-      data: {
-        userId: req.user.userId,
-        spotId: parseInt(spotId),
-        checkIn: checkInDate,
-        checkOut: checkOutDate,
-        guests: parseInt(guests),
-        totalPrice: totalPrice,
-        status: 'CONFIRMED',
-        notes: notes?.trim() || null
-      },
-      include: {
-        spot: {
-          select: {
-            id: true,
-            title: true,
-            location: true,
-            price: true,
-            images: true
-          }
+    // Create booking with transaction to ensure data consistency
+    const booking = await req.prisma.$transaction(async (prisma) => {
+      // Double-check for conflicts within transaction
+      const finalConflictCheck = await prisma.booking.findMany({
+        where: {
+          spotId: spotIdInt,
+          status: {
+            in: ['CONFIRMED', 'PENDING']
+          },
+          OR: [
+            {
+              AND: [
+                { checkIn: { lt: checkInDate } },
+                { checkOut: { gt: checkInDate } }
+              ]
+            },
+            {
+              AND: [
+                { checkIn: { lt: checkOutDate } },
+                { checkOut: { gt: checkOutDate } }
+              ]
+            },
+            {
+              AND: [
+                { checkIn: { gte: checkInDate } },
+                { checkOut: { lte: checkOutDate } }
+              ]
+            },
+            {
+              AND: [
+                { checkIn: { lte: checkInDate } },
+                { checkOut: { gte: checkOutDate } }
+              ]
+            }
+          ]
+        }
+      });
+
+      if (finalConflictCheck.length > 0) {
+        throw new Error('BOOKING_CONFLICT');
+      }
+
+      return await prisma.booking.create({
+        data: {
+          userId: req.user.userId,
+          spotId: spotIdInt,
+          checkIn: checkInDate,
+          checkOut: checkOutDate,
+          guests: guestCount,
+          totalPrice: totalPrice,
+          status: 'CONFIRMED',
+          notes: notes?.trim() || null
         },
-        user: {
-          select: {
-            firstName: true,
-            lastName: true,
-            email: true
+        include: {
+          spot: {
+            select: {
+              id: true,
+              title: true,
+              location: true,
+              price: true,
+              images: true
+            }
+          },
+          user: {
+            select: {
+              firstName: true,
+              lastName: true,
+              email: true
+            }
           }
         }
-      }
+      });
     });
+
+    // Parse images safely
+    let spotImages = [];
+    if (booking.spot.images) {
+      try {
+        spotImages = typeof booking.spot.images === 'string' 
+          ? JSON.parse(booking.spot.images) 
+          : booking.spot.images;
+      } catch (e) {
+        console.warn('Failed to parse spot images:', e);
+        spotImages = [];
+      }
+    }
 
     res.status(201).json({
       message: 'Booking created successfully',
@@ -167,17 +268,38 @@ router.post('/', async function(req, res, next) {
         ...booking,
         spot: {
           ...booking.spot,
-          images: booking.spot.images ? JSON.parse(booking.spot.images) : []
+          images: spotImages
         },
         nights,
-        pricePerNight: parseFloat(spot.price)
+        pricePerNight: pricePerNight
       }
     });
 
   } catch (error) {
     console.error('Error creating booking:', error);
+    
+    if (error.message === 'BOOKING_CONFLICT') {
+      return res.status(409).json({
+        message: 'The selected dates are no longer available. Please choose different dates.'
+      });
+    }
+    
+    // Handle Prisma-specific errors
+    if (error.code === 'P2002') {
+      return res.status(409).json({
+        message: 'A booking conflict occurred. Please try again.'
+      });
+    }
+    
+    if (error.code === 'P2003') {
+      return res.status(400).json({
+        message: 'Invalid spot or user reference'
+      });
+    }
+
     res.status(500).json({
-      message: 'Error creating booking'
+      message: 'Error creating booking',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -220,14 +342,27 @@ router.get('/', async function(req, res, next) {
       const checkOut = new Date(booking.checkOut);
       const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
       
+      // Safely parse images
+      let spotImages = [];
+      if (booking.spot.images) {
+        try {
+          spotImages = typeof booking.spot.images === 'string' 
+            ? JSON.parse(booking.spot.images) 
+            : booking.spot.images;
+        } catch (e) {
+          console.warn('Failed to parse spot images:', e);
+          spotImages = [];
+        }
+      }
+      
       return {
         ...booking,
         spot: {
           ...booking.spot,
-          images: booking.spot.images ? JSON.parse(booking.spot.images) : []
+          images: spotImages
         },
         nights,
-        pricePerNight: booking.totalPrice / nights,
+        pricePerNight: parseFloat(booking.totalPrice) / nights,
         canCancel: canCancelBooking(booking)
       };
     });
@@ -240,7 +375,8 @@ router.get('/', async function(req, res, next) {
   } catch (error) {
     console.error('Error fetching bookings:', error);
     res.status(500).json({
-      message: 'Error fetching bookings'
+      message: 'Error fetching bookings',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -287,15 +423,39 @@ router.get('/:id', async function(req, res, next) {
     const checkOut = new Date(booking.checkOut);
     const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
 
+    // Safely parse JSON fields
+    let spotImages = [];
+    let spotAmenities = [];
+    
+    if (booking.spot.images) {
+      try {
+        spotImages = typeof booking.spot.images === 'string' 
+          ? JSON.parse(booking.spot.images) 
+          : booking.spot.images;
+      } catch (e) {
+        console.warn('Failed to parse spot images:', e);
+      }
+    }
+    
+    if (booking.spot.amenities) {
+      try {
+        spotAmenities = typeof booking.spot.amenities === 'string' 
+          ? JSON.parse(booking.spot.amenities) 
+          : booking.spot.amenities;
+      } catch (e) {
+        console.warn('Failed to parse spot amenities:', e);
+      }
+    }
+
     const enrichedBooking = {
       ...booking,
       spot: {
         ...booking.spot,
-        images: booking.spot.images ? JSON.parse(booking.spot.images) : [],
-        amenities: booking.spot.amenities ? JSON.parse(booking.spot.amenities) : []
+        images: spotImages,
+        amenities: spotAmenities
       },
       nights,
-      pricePerNight: booking.totalPrice / nights,
+      pricePerNight: parseFloat(booking.totalPrice) / nights,
       canCancel: canCancelBooking(booking)
     };
 
@@ -307,7 +467,8 @@ router.get('/:id', async function(req, res, next) {
   } catch (error) {
     console.error('Error fetching booking:', error);
     res.status(500).json({
-      message: 'Error fetching booking'
+      message: 'Error fetching booking',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -373,7 +534,8 @@ router.put('/:id/cancel', async function(req, res, next) {
   } catch (error) {
     console.error('Error cancelling booking:', error);
     res.status(500).json({
-      message: 'Error cancelling booking'
+      message: 'Error cancelling booking',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -391,7 +553,8 @@ router.post('/:id/review', async function(req, res, next) {
     }
 
     // Validate rating
-    if (!rating || rating < 1 || rating > 5 || !Number.isInteger(Number(rating))) {
+    const ratingNum = parseInt(rating);
+    if (!ratingNum || ratingNum < 1 || ratingNum > 5) {
       return res.status(400).json({
         message: 'Rating is required and must be an integer between 1 and 5'
       });
@@ -435,7 +598,7 @@ router.post('/:id/review', async function(req, res, next) {
       data: {
         userId: req.user.userId,
         spotId: booking.spotId,
-        rating: parseInt(rating),
+        rating: ratingNum,
         comment: comment?.trim() || null,
         isVerified: true
       }
@@ -449,7 +612,8 @@ router.post('/:id/review', async function(req, res, next) {
   } catch (error) {
     console.error('Error adding review:', error);
     res.status(500).json({
-      message: 'Error adding review'
+      message: 'Error adding review',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
