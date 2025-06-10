@@ -44,7 +44,7 @@ model CampingSpot {
   address     String?
   city        String?
   state       String?
-  country     String?  @default("USA")
+  country     String?  @default("Belgium")
   zipCode     String?
   
   // Geographic coordinates

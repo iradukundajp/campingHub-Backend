@@ -180,12 +180,14 @@ router.get('/users', async function(req, res, next) {
     // Build filter
     const where = {};
     
+    // FIXED: MySQL-compatible search without mode parameter
     if (search) {
+      const searchTerm = search.trim();
       where.OR = [
-        { email: { contains: search, mode: 'insensitive' } },
-        { firstName: { contains: search, mode: 'insensitive' } },
-        { lastName: { contains: search, mode: 'insensitive' } },
-        { phone: { contains: search, mode: 'insensitive' } }
+        { email: { contains: searchTerm } },
+        { firstName: { contains: searchTerm } },
+        { lastName: { contains: searchTerm } },
+        { phone: { contains: searchTerm } }
       ];
     }
 
@@ -363,13 +365,15 @@ router.get('/spots', async function(req, res, next) {
     // Build filter
     const where = {};
     
+    // FIXED: MySQL-compatible search without mode parameter
     if (search) {
+      const searchTerm = search.trim();
       where.OR = [
-        { title: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { location: { contains: search, mode: 'insensitive' } },
-        { city: { contains: search, mode: 'insensitive' } },
-        { state: { contains: search, mode: 'insensitive' } }
+        { title: { contains: searchTerm } },
+        { description: { contains: searchTerm } },
+        { location: { contains: searchTerm } },
+        { city: { contains: searchTerm } },
+        { state: { contains: searchTerm } }
       ];
     }
 
@@ -378,11 +382,11 @@ router.get('/spots', async function(req, res, next) {
     }
 
     if (city) {
-      where.city = { contains: city, mode: 'insensitive' };
+      where.city = { contains: city.trim() };
     }
 
     if (state) {
-      where.state = { contains: state, mode: 'insensitive' };
+      where.state = { contains: state.trim() };
     }
 
     const [spots, total] = await Promise.all([

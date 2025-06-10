@@ -23,12 +23,14 @@ router.get('/spots', async function(req, res, next) {
       where.isActive = status === 'active';
     }
 
+    // FIXED: MySQL-compatible search without mode parameter
     if (search) {
+      const searchTerm = search.trim();
       where.OR = [
-        { title: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { location: { contains: search, mode: 'insensitive' } },
-        { city: { contains: search, mode: 'insensitive' } }
+        { title: { contains: searchTerm } },
+        { description: { contains: searchTerm } },
+        { location: { contains: searchTerm } },
+        { city: { contains: searchTerm } }
       ];
     }
 

@@ -74,9 +74,13 @@ router.post('/auth/login', async function(req, res, next) {
       });
     }
 
-    // Find user by email
-    const user = await req.prisma.user.findUnique({
-      where: { email: email.toLowerCase() }
+    // Find user by email (case-insensitive search for MySQL)
+    const user = await req.prisma.user.findFirst({
+      where: { 
+        email: {
+          equals: email.toLowerCase()
+        }
+      }
     });
 
     if (!user) {
@@ -162,9 +166,13 @@ router.post('/auth/register', async function(req, res, next) {
       });
     }
 
-    // Check if user already exists
-    const existingUser = await req.prisma.user.findUnique({
-      where: { email: email.toLowerCase() }
+    // Check if user already exists (case-insensitive)
+    const existingUser = await req.prisma.user.findFirst({
+      where: { 
+        email: {
+          equals: email.toLowerCase()
+        }
+      }
     });
 
     if (existingUser) {
@@ -303,10 +311,12 @@ router.put('/auth/profile', authenticateToken, async function(req, res, next) {
         });
       }
       
-      // Check if email is already taken
+      // Check if email is already taken (case-insensitive)
       const existingUser = await req.prisma.user.findFirst({
         where: {
-          email: email.toLowerCase(),
+          email: {
+            equals: email.toLowerCase()
+          },
           id: { not: req.user.userId }
         }
       });
@@ -387,6 +397,8 @@ router.get('/spots', async function(req, res, next) {
       sortOrder = 'desc'
     } = req.query;
     
+    console.log('🔍 Search query parameters:', req.query);
+    
     // Pagination with proper validation
     const pageNum = Math.max(1, parseInt(page) || 1);
     const limitNum = Math.min(50, Math.max(1, parseInt(limit) || 12));
@@ -397,31 +409,35 @@ router.get('/spots', async function(req, res, next) {
       isActive: true
     };
 
-    // Add search filter
+    // FIXED: MySQL-compatible search without mode parameter
     if (search && search.trim()) {
       const searchTerm = search.trim();
       where.OR = [
-        { title: { contains: searchTerm, mode: 'insensitive' } },
-        { description: { contains: searchTerm, mode: 'insensitive' } },
-        { location: { contains: searchTerm, mode: 'insensitive' } },
-        { city: { contains: searchTerm, mode: 'insensitive' } },
-        { state: { contains: searchTerm, mode: 'insensitive' } }
+        { title: { contains: searchTerm } },
+        { description: { contains: searchTerm } },
+        { location: { contains: searchTerm } },
+        { city: { contains: searchTerm } },
+        { state: { contains: searchTerm } }
       ];
+      console.log('🔍 Applied search filter for:', searchTerm);
     }
 
     // Add location filter
     if (location && location.trim()) {
-      where.location = { contains: location.trim(), mode: 'insensitive' };
+      where.location = { contains: location.trim() };
+      console.log('📍 Applied location filter:', location.trim());
     }
 
     // Add city filter
     if (city && city.trim()) {
-      where.city = { contains: city.trim(), mode: 'insensitive' };
+      where.city = { contains: city.trim() };
+      console.log('🏙️ Applied city filter:', city.trim());
     }
 
     // Add state filter
     if (state && state.trim()) {
-      where.state = { contains: state.trim(), mode: 'insensitive' };
+      where.state = { contains: state.trim() };
+      console.log('🗺️ Applied state filter:', state.trim());
     }
 
     // Add price filters with validation
@@ -431,12 +447,14 @@ router.get('/spots', async function(req, res, next) {
         const min = parseFloat(minPrice);
         if (!isNaN(min) && min >= 0) {
           where.price.gte = min;
+          console.log('💰 Applied min price filter:', min);
         }
       }
       if (maxPrice) {
         const max = parseFloat(maxPrice);
         if (!isNaN(max) && max >= 0) {
           where.price.lte = max;
+          console.log('💰 Applied max price filter:', max);
         }
       }
     }
@@ -446,14 +464,58 @@ router.get('/spots', async function(req, res, next) {
       const cap = parseInt(capacity);
       if (!isNaN(cap) && cap > 0) {
         where.capacity = { gte: cap };
+        console.log('👥 Applied capacity filter:', cap);
       }
     }
 
-    // Add category filter (search in amenities)
+    // FIXED: Add date availability filter
+    if (checkIn && checkOut) {
+      try {
+        const checkInDate = new Date(checkIn);
+        const checkOutDate = new Date(checkOut);
+        
+        if (!isNaN(checkInDate.getTime()) && !isNaN(checkOutDate.getTime())) {
+          // Exclude spots with conflicting bookings
+          where.bookings = {
+            none: {
+              status: {
+                in: ['CONFIRMED', 'PENDING']
+              },
+              OR: [
+                {
+                  AND: [
+                    { checkIn: { lt: checkInDate } },
+                    { checkOut: { gt: checkInDate } }
+                  ]
+                },
+                {
+                  AND: [
+                    { checkIn: { lt: checkOutDate } },
+                    { checkOut: { gt: checkOutDate } }
+                  ]
+                },
+                {
+                  AND: [
+                    { checkIn: { gte: checkInDate } },
+                    { checkOut: { lte: checkOutDate } }
+                  ]
+                }
+              ]
+            }
+          };
+          console.log('📅 Applied date availability filter:', checkIn, 'to', checkOut);
+        }
+      } catch (dateError) {
+        console.warn('⚠️ Invalid date format:', dateError.message);
+      }
+    }
+
+    // Add category filter (search in amenities JSON)
     if (category && category.trim()) {
       where.amenities = { 
         string_contains: category.trim()
       };
+      console.log('🏷️ Applied category filter:', category.trim());
     }
 
     // Build orderBy clause with validation
@@ -463,6 +525,7 @@ router.get('/spots', async function(req, res, next) {
     
     if (validSortFields.includes(sortBy) && validSortOrders.includes(sortOrder.toLowerCase())) {
       orderBy = { [sortBy]: sortOrder.toLowerCase() };
+      console.log('📊 Applied sorting:', sortBy, sortOrder);
     }
 
     let spots, total;
@@ -493,12 +556,17 @@ router.get('/spots', async function(req, res, next) {
         orderBy
       };
 
+      console.log('🗃️ Executing database query with filters:', JSON.stringify(where, null, 2));
+
       [spots, total] = await Promise.all([
         req.prisma.campingSpot.findMany(queryOptions),
         req.prisma.campingSpot.count({ where })
       ]);
+
+      console.log('✅ Query successful - found', spots.length, 'spots out of', total, 'total');
+
     } catch (dbError) {
-      console.error('Database query error:', dbError);
+      console.error('❌ Database query error:', dbError);
       return res.status(500).json({
         message: 'Database query failed',
         error: process.env.NODE_ENV === 'development' ? dbError.message : 'Internal server error'
@@ -577,7 +645,7 @@ router.get('/spots', async function(req, res, next) {
       }
     });
   } catch (error) {
-    console.error('Error fetching spots:', error);
+    console.error('❌ Error fetching spots:', error);
     res.status(500).json({
       message: 'Error fetching camping spots',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'

@@ -24,6 +24,7 @@ var usersRouter = require('./routes/users');
 var ownersRouter = require('./routes/owners');
 var bookingsRouter = require('./routes/bookings');
 var adminRouter = require('./routes/admin');
+var uploadRouter = require('./routes/upload'); // ADDED: Upload route
 
 var app = express();
 
@@ -82,6 +83,9 @@ app.use(express.urlencoded({
 }));
 app.use(cookieParser());
 
+// ADDED: Serve static files for uploads
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+
 // Database middleware with improved error handling
 app.use(async (req, res, next) => {
   try {
@@ -131,6 +135,7 @@ app.use('/api/users', usersRouter);
 app.use('/api/owners', ownersRouter);
 app.use('/api/bookings', bookingsRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/upload', uploadRouter); // ADDED: Upload route
 
 // Root redirect
 app.get('/', (req, res) => {
