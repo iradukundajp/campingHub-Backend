@@ -20,16 +20,36 @@ router.use(requireAdmin);
 router.get('/dashboard', async function(req, res, next) {
   try {
     // Get overview statistics
-    const [userCount, ownerCount, spotCount, activeSpotCount, bookingCount, totalRevenue] = await Promise.all([
+    const [
+      userCount, 
+      ownerCount, 
+      adminCount,
+      spotCount, 
+      activeSpotCount, 
+      bookingCount,
+      pendingBookings,
+      confirmedBookings,
+      totalRevenue,
+      pendingPayments,
+      paidPayments
+    ] = await Promise.all([
       req.prisma.user.count({ where: { role: 'USER' } }),
       req.prisma.user.count({ where: { role: 'OWNER' } }),
+      req.prisma.user.count({ where: { role: 'ADMIN' } }),
       req.prisma.campingSpot.count(),
       req.prisma.campingSpot.count({ where: { isActive: true } }),
       req.prisma.booking.count(),
+      req.prisma.booking.count({ where: { status: 'PENDING' } }),
+      req.prisma.booking.count({ where: { status: 'CONFIRMED' } }),
       req.prisma.booking.aggregate({
         _sum: { totalPrice: true },
-        where: { status: 'CONFIRMED' }
-      })
+        where: { 
+          status: 'CONFIRMED',
+          paymentStatus: 'PAID'
+        }
+      }),
+      req.prisma.booking.count({ where: { paymentStatus: 'PENDING' } }),
+      req.prisma.booking.count({ where: { paymentStatus: 'PAID' } })
     ]);
 
     // Get recent users (last 5)
@@ -42,7 +62,15 @@ router.get('/dashboard', async function(req, res, next) {
         firstName: true,
         lastName: true,
         role: true,
-        createdAt: true
+        isActive: true,
+        isVerified: true,
+        createdAt: true,
+        _count: {
+          select: {
+            bookings: true,
+            ownedSpots: true
+          }
+        }
       }
     });
 
@@ -55,25 +83,70 @@ router.get('/dashboard', async function(req, res, next) {
           select: { firstName: true, lastName: true, email: true }
         },
         spot: {
-          select: { title: true, location: true }
+          select: { title: true, location: true, city: true, state: true }
         }
       }
     });
+
+    // Get recent spots (last 5)
+    const recentSpots = await req.prisma.campingSpot.findMany({
+      take: 5,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        owner: {
+          select: { firstName: true, lastName: true }
+        },
+        _count: {
+          select: { bookings: true, reviews: true }
+        }
+      }
+    });
+
+    // Format recent bookings with computed data
+    const formattedRecentBookings = recentBookings.map(booking => ({
+      ...booking,
+      totalPrice: parseFloat(booking.totalPrice),
+      nights: Math.ceil((new Date(booking.checkOut) - new Date(booking.checkIn)) / (1000 * 60 * 60 * 24))
+    }));
+
+    // Format recent spots with computed data
+    const formattedRecentSpots = recentSpots.map(spot => ({
+      ...spot,
+      price: parseFloat(spot.price),
+      images: spot.images ? JSON.parse(spot.images) : [],
+      amenities: spot.amenities ? JSON.parse(spot.amenities) : []
+    }));
 
     res.json({
       message: 'Dashboard data retrieved successfully',
       dashboard: {
         overview: {
-          totalUsers: userCount,
-          totalOwners: ownerCount,
-          totalSpots: spotCount,
-          activeSpots: activeSpotCount,
-          totalBookings: bookingCount,
-          totalRevenue: totalRevenue._sum.totalPrice || 0
+          users: {
+            total: userCount,
+            regular: userCount,
+            owners: ownerCount,
+            admins: adminCount
+          },
+          spots: {
+            total: spotCount,
+            active: activeSpotCount,
+            inactive: spotCount - activeSpotCount
+          },
+          bookings: {
+            total: bookingCount,
+            pending: pendingBookings,
+            confirmed: confirmedBookings
+          },
+          revenue: {
+            total: parseFloat(totalRevenue._sum.totalPrice || 0),
+            pendingPayments: pendingPayments,
+            paidPayments: paidPayments
+          }
         },
         recentActivity: {
           recentUsers,
-          recentBookings
+          recentBookings: formattedRecentBookings,
+          recentSpots: formattedRecentSpots
         }
       }
     });
@@ -81,7 +154,8 @@ router.get('/dashboard', async function(req, res, next) {
   } catch (error) {
     console.error('Admin dashboard error:', error);
     res.status(500).json({
-      message: 'Error fetching dashboard data'
+      message: 'Error fetching dashboard data',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -92,6 +166,8 @@ router.get('/users', async function(req, res, next) {
     const { 
       search, 
       role, 
+      isActive,
+      isVerified,
       page = 1, 
       limit = 20 
     } = req.query;
@@ -108,12 +184,21 @@ router.get('/users', async function(req, res, next) {
       where.OR = [
         { email: { contains: search, mode: 'insensitive' } },
         { firstName: { contains: search, mode: 'insensitive' } },
-        { lastName: { contains: search, mode: 'insensitive' } }
+        { lastName: { contains: search, mode: 'insensitive' } },
+        { phone: { contains: search, mode: 'insensitive' } }
       ];
     }
 
     if (role && ['USER', 'OWNER', 'ADMIN'].includes(role.toUpperCase())) {
       where.role = role.toUpperCase();
+    }
+
+    if (isActive !== undefined) {
+      where.isActive = isActive === 'true';
+    }
+
+    if (isVerified !== undefined) {
+      where.isVerified = isVerified === 'true';
     }
 
     const [users, total] = await Promise.all([
@@ -127,10 +212,13 @@ router.get('/users', async function(req, res, next) {
           email: true,
           firstName: true,
           lastName: true,
+          phone: true,
+          avatar: true,
           role: true,
           isActive: true,
           isVerified: true,
           createdAt: true,
+          updatedAt: true,
           _count: {
             select: {
               bookings: true,
@@ -159,7 +247,8 @@ router.get('/users', async function(req, res, next) {
   } catch (error) {
     console.error('Admin users fetch error:', error);
     res.status(500).json({
-      message: 'Error fetching users'
+      message: 'Error fetching users',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -194,6 +283,13 @@ router.put('/users/:id', async function(req, res, next) {
       });
     }
 
+    // Prevent admin from removing their own admin role
+    if (userId === req.user.userId && role && role !== 'ADMIN') {
+      return res.status(400).json({
+        message: 'You cannot change your own admin role'
+      });
+    }
+
     // Build update data
     const updateData = {};
     if (isActive !== undefined) updateData.isActive = Boolean(isActive);
@@ -225,6 +321,7 @@ router.put('/users/:id', async function(req, res, next) {
         email: true,
         firstName: true,
         lastName: true,
+        phone: true,
         role: true,
         isActive: true,
         isVerified: true,
@@ -240,7 +337,8 @@ router.put('/users/:id', async function(req, res, next) {
   } catch (error) {
     console.error('Admin user update error:', error);
     res.status(500).json({
-      message: 'Error updating user'
+      message: 'Error updating user',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -251,6 +349,8 @@ router.get('/spots', async function(req, res, next) {
     const { 
       search, 
       isActive,
+      city,
+      state,
       page = 1, 
       limit = 20 
     } = req.query;
@@ -267,12 +367,22 @@ router.get('/spots', async function(req, res, next) {
       where.OR = [
         { title: { contains: search, mode: 'insensitive' } },
         { description: { contains: search, mode: 'insensitive' } },
-        { location: { contains: search, mode: 'insensitive' } }
+        { location: { contains: search, mode: 'insensitive' } },
+        { city: { contains: search, mode: 'insensitive' } },
+        { state: { contains: search, mode: 'insensitive' } }
       ];
     }
 
     if (isActive !== undefined) {
       where.isActive = isActive === 'true';
+    }
+
+    if (city) {
+      where.city = { contains: city, mode: 'insensitive' };
+    }
+
+    if (state) {
+      where.state = { contains: state, mode: 'insensitive' };
     }
 
     const [spots, total] = await Promise.all([
@@ -287,7 +397,8 @@ router.get('/spots', async function(req, res, next) {
               id: true,
               firstName: true,
               lastName: true,
-              email: true
+              email: true,
+              phone: true
             }
           },
           _count: {
@@ -304,6 +415,7 @@ router.get('/spots', async function(req, res, next) {
     // Process spots
     const processedSpots = spots.map(spot => ({
       ...spot,
+      price: parseFloat(spot.price),
       images: spot.images ? JSON.parse(spot.images) : [],
       amenities: spot.amenities ? JSON.parse(spot.amenities) : [],
       totalBookings: spot._count.bookings,
@@ -326,7 +438,8 @@ router.get('/spots', async function(req, res, next) {
   } catch (error) {
     console.error('Admin spots fetch error:', error);
     res.status(500).json({
-      message: 'Error fetching camping spots'
+      message: 'Error fetching camping spots',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -375,6 +488,7 @@ router.put('/spots/:id', async function(req, res, next) {
       message: 'Camping spot updated successfully',
       spot: {
         ...updatedSpot,
+        price: parseFloat(updatedSpot.price),
         images: updatedSpot.images ? JSON.parse(updatedSpot.images) : [],
         amenities: updatedSpot.amenities ? JSON.parse(updatedSpot.amenities) : []
       }
@@ -383,7 +497,8 @@ router.put('/spots/:id', async function(req, res, next) {
   } catch (error) {
     console.error('Admin spot update error:', error);
     res.status(500).json({
-      message: 'Error updating camping spot'
+      message: 'Error updating camping spot',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -393,6 +508,7 @@ router.get('/bookings', async function(req, res, next) {
   try {
     const { 
       status,
+      paymentStatus,
       page = 1, 
       limit = 20 
     } = req.query;
@@ -406,9 +522,16 @@ router.get('/bookings', async function(req, res, next) {
     const where = {};
     
     if (status) {
-      const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'];
+      const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'REFUNDED'];
       if (validStatuses.includes(status.toUpperCase())) {
         where.status = status.toUpperCase();
+      }
+    }
+
+    if (paymentStatus) {
+      const validPaymentStatuses = ['PENDING', 'PAID', 'FAILED', 'REFUNDED'];
+      if (validPaymentStatuses.includes(paymentStatus.toUpperCase())) {
+        where.paymentStatus = paymentStatus.toUpperCase();
       }
     }
 
@@ -424,7 +547,8 @@ router.get('/bookings', async function(req, res, next) {
               id: true,
               firstName: true,
               lastName: true,
-              email: true
+              email: true,
+              phone: true
             }
           },
           spot: {
@@ -432,7 +556,16 @@ router.get('/bookings', async function(req, res, next) {
               id: true,
               title: true,
               location: true,
-              price: true
+              city: true,
+              state: true,
+              price: true,
+              owner: {
+                select: {
+                  firstName: true,
+                  lastName: true,
+                  email: true
+                }
+              }
             }
           }
         }
@@ -440,9 +573,27 @@ router.get('/bookings', async function(req, res, next) {
       req.prisma.booking.count({ where })
     ]);
 
+    // Process bookings with computed data
+    const processedBookings = bookings.map(booking => {
+      const checkIn = new Date(booking.checkIn);
+      const checkOut = new Date(booking.checkOut);
+      const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+      
+      return {
+        ...booking,
+        totalPrice: parseFloat(booking.totalPrice),
+        spot: {
+          ...booking.spot,
+          price: parseFloat(booking.spot.price)
+        },
+        nights,
+        pricePerNight: parseFloat(booking.totalPrice) / nights
+      };
+    });
+
     res.json({
       message: 'Bookings retrieved successfully',
-      bookings,
+      bookings: processedBookings,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -456,7 +607,103 @@ router.get('/bookings', async function(req, res, next) {
   } catch (error) {
     console.error('Admin bookings fetch error:', error);
     res.status(500).json({
-      message: 'Error fetching bookings'
+      message: 'Error fetching bookings',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* PUT /api/admin/bookings/:id - Update booking status */
+router.put('/bookings/:id', async function(req, res, next) {
+  try {
+    const bookingId = parseInt(req.params.id);
+    const { status, paymentStatus, notes } = req.body;
+
+    if (isNaN(bookingId)) {
+      return res.status(400).json({
+        message: 'Invalid booking ID'
+      });
+    }
+
+    // Check if booking exists
+    const existingBooking = await req.prisma.booking.findUnique({
+      where: { id: bookingId }
+    });
+
+    if (!existingBooking) {
+      return res.status(404).json({
+        message: 'Booking not found'
+      });
+    }
+
+    // Build update data
+    const updateData = {};
+    
+    if (status !== undefined) {
+      const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'REFUNDED'];
+      if (!validStatuses.includes(status.toUpperCase())) {
+        return res.status(400).json({
+          message: 'Invalid status. Must be PENDING, CONFIRMED, CANCELLED, COMPLETED, or REFUNDED'
+        });
+      }
+      updateData.status = status.toUpperCase();
+    }
+
+    if (paymentStatus !== undefined) {
+      const validPaymentStatuses = ['PENDING', 'PAID', 'FAILED', 'REFUNDED'];
+      if (!validPaymentStatuses.includes(paymentStatus.toUpperCase())) {
+        return res.status(400).json({
+          message: 'Invalid payment status. Must be PENDING, PAID, FAILED, or REFUNDED'
+        });
+      }
+      updateData.paymentStatus = paymentStatus.toUpperCase();
+    }
+
+    if (notes !== undefined) {
+      updateData.notes = notes ? notes.trim() : null;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        message: 'No valid fields provided for update'
+      });
+    }
+
+    updateData.updatedAt = new Date();
+
+    const updatedBooking = await req.prisma.booking.update({
+      where: { id: bookingId },
+      data: updateData,
+      include: {
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+            email: true
+          }
+        },
+        spot: {
+          select: {
+            title: true,
+            location: true
+          }
+        }
+      }
+    });
+
+    res.json({
+      message: 'Booking updated successfully',
+      booking: {
+        ...updatedBooking,
+        totalPrice: parseFloat(updatedBooking.totalPrice)
+      }
+    });
+
+  } catch (error) {
+    console.error('Admin booking update error:', error);
+    res.status(500).json({
+      message: 'Error updating booking',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -506,7 +753,162 @@ router.delete('/users/:id', async function(req, res, next) {
   } catch (error) {
     console.error('Admin user delete error:', error);
     res.status(500).json({
-      message: 'Error deleting user'
+      message: 'Error deleting user',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* GET /api/admin/analytics - Get analytics data */
+router.get('/analytics', async function(req, res, next) {
+  try {
+    const { period = '30days' } = req.query;
+    
+    // Calculate date range based on period
+    const endDate = new Date();
+    const startDate = new Date();
+    
+    switch (period) {
+      case '7days':
+        startDate.setDate(endDate.getDate() - 7);
+        break;
+      case '30days':
+        startDate.setDate(endDate.getDate() - 30);
+        break;
+      case '90days':
+        startDate.setDate(endDate.getDate() - 90);
+        break;
+      case '1year':
+        startDate.setFullYear(endDate.getFullYear() - 1);
+        break;
+      default:
+        startDate.setDate(endDate.getDate() - 30);
+    }
+
+    // Get analytics data
+    const [
+      newUsers,
+      newBookings,
+      revenue,
+      topSpots,
+      bookingsByStatus,
+      paymentsByStatus
+    ] = await Promise.all([
+      // New users in period
+      req.prisma.user.count({
+        where: {
+          createdAt: {
+            gte: startDate,
+            lte: endDate
+          }
+        }
+      }),
+      
+      // New bookings in period
+      req.prisma.booking.count({
+        where: {
+          createdAt: {
+            gte: startDate,
+            lte: endDate
+          }
+        }
+      }),
+      
+      // Revenue in period
+      req.prisma.booking.aggregate({
+        _sum: { totalPrice: true },
+        where: {
+          createdAt: {
+            gte: startDate,
+            lte: endDate
+          },
+          paymentStatus: 'PAID'
+        }
+      }),
+      
+      // Top spots by bookings
+      req.prisma.campingSpot.findMany({
+        take: 10,
+        include: {
+          _count: {
+            select: {
+              bookings: {
+                where: {
+                  createdAt: {
+                    gte: startDate,
+                    lte: endDate
+                  }
+                }
+              }
+            }
+          }
+        },
+        orderBy: {
+          bookings: {
+            _count: 'desc'
+          }
+        }
+      }),
+      
+      // Bookings by status
+      req.prisma.booking.groupBy({
+        by: ['status'],
+        _count: {
+          status: true
+        },
+        where: {
+          createdAt: {
+            gte: startDate,
+            lte: endDate
+          }
+        }
+      }),
+      
+      // Payments by status
+      req.prisma.booking.groupBy({
+        by: ['paymentStatus'],
+        _count: {
+          paymentStatus: true
+        },
+        where: {
+          createdAt: {
+            gte: startDate,
+            lte: endDate
+          }
+        }
+      })
+    ]);
+
+    res.json({
+      message: 'Analytics data retrieved successfully',
+      analytics: {
+        period,
+        dateRange: {
+          start: startDate,
+          end: endDate
+        },
+        summary: {
+          newUsers,
+          newBookings,
+          revenue: parseFloat(revenue._sum.totalPrice || 0)
+        },
+        topSpots: topSpots.map(spot => ({
+          id: spot.id,
+          title: spot.title,
+          location: spot.location,
+          bookingCount: spot._count.bookings,
+          price: parseFloat(spot.price)
+        })),
+        bookingsByStatus,
+        paymentsByStatus
+      }
+    });
+
+  } catch (error) {
+    console.error('Admin analytics error:', error);
+    res.status(500).json({
+      message: 'Error fetching analytics data',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });

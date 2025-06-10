@@ -8,7 +8,7 @@ router.use(authenticateToken);
 /* POST /api/bookings - Create a new booking */
 router.post('/', async function(req, res, next) {
   try {
-    const { spotId, checkIn, checkOut, guests, notes } = req.body;
+    const { spotId, checkIn, checkOut, guests, notes, paymentMethod } = req.body;
 
     // Enhanced validation
     if (!spotId || !checkIn || !checkOut || !guests) {
@@ -89,7 +89,8 @@ router.post('/', async function(req, res, next) {
             id: true,
             firstName: true,
             lastName: true,
-            email: true
+            email: true,
+            phone: true
           }
         }
       }
@@ -175,6 +176,10 @@ router.post('/', async function(req, res, next) {
     const pricePerNight = parseFloat(spot.price);
     const totalPrice = nights * pricePerNight;
 
+    // Determine booking status based on instant book
+    const bookingStatus = spot.isInstantBook ? 'CONFIRMED' : 'PENDING';
+    const paymentStatus = 'PENDING'; // Default payment status
+
     // Create booking with transaction to ensure data consistency
     const booking = await req.prisma.$transaction(async (prisma) => {
       // Double-check for conflicts within transaction
@@ -225,7 +230,8 @@ router.post('/', async function(req, res, next) {
           checkOut: checkOutDate,
           guests: guestCount,
           totalPrice: totalPrice,
-          status: 'CONFIRMED',
+          status: bookingStatus,
+          paymentStatus: paymentStatus,
           notes: notes?.trim() || null
         },
         include: {
@@ -234,23 +240,29 @@ router.post('/', async function(req, res, next) {
               id: true,
               title: true,
               location: true,
+              city: true,
+              state: true,
               price: true,
-              images: true
+              images: true,
+              amenities: true
             }
           },
           user: {
             select: {
               firstName: true,
               lastName: true,
-              email: true
+              email: true,
+              phone: true
             }
           }
         }
       });
     });
 
-    // Parse images safely
+    // Parse images and amenities safely
     let spotImages = [];
+    let spotAmenities = [];
+    
     if (booking.spot.images) {
       try {
         spotImages = typeof booking.spot.images === 'string' 
@@ -262,13 +274,25 @@ router.post('/', async function(req, res, next) {
       }
     }
 
+    if (booking.spot.amenities) {
+      try {
+        spotAmenities = typeof booking.spot.amenities === 'string' 
+          ? JSON.parse(booking.spot.amenities) 
+          : booking.spot.amenities;
+      } catch (e) {
+        console.warn('Failed to parse spot amenities:', e);
+        spotAmenities = [];
+      }
+    }
+
     res.status(201).json({
       message: 'Booking created successfully',
       booking: {
         ...booking,
         spot: {
           ...booking.spot,
-          images: spotImages
+          images: spotImages,
+          amenities: spotAmenities
         },
         nights,
         pricePerNight: pricePerNight
@@ -307,14 +331,22 @@ router.post('/', async function(req, res, next) {
 /* GET /api/bookings - Get user's bookings */
 router.get('/', async function(req, res, next) {
   try {
-    const { status } = req.query;
+    const { status, paymentStatus } = req.query;
 
     // Build where clause
     const where = { userId: req.user.userId };
+    
     if (status) {
-      const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'];
+      const validStatuses = ['PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'REFUNDED'];
       if (validStatuses.includes(status.toUpperCase())) {
         where.status = status.toUpperCase();
+      }
+    }
+
+    if (paymentStatus) {
+      const validPaymentStatuses = ['PENDING', 'PAID', 'FAILED', 'REFUNDED'];
+      if (validPaymentStatuses.includes(paymentStatus.toUpperCase())) {
+        where.paymentStatus = paymentStatus.toUpperCase();
       }
     }
 
@@ -326,8 +358,19 @@ router.get('/', async function(req, res, next) {
             id: true,
             title: true,
             location: true,
+            city: true,
+            state: true,
             price: true,
-            images: true
+            images: true,
+            amenities: true,
+            owner: {
+              select: {
+                firstName: true,
+                lastName: true,
+                email: true,
+                phone: true
+              }
+            }
           }
         }
       },
@@ -342,8 +385,10 @@ router.get('/', async function(req, res, next) {
       const checkOut = new Date(booking.checkOut);
       const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
       
-      // Safely parse images
+      // Safely parse images and amenities
       let spotImages = [];
+      let spotAmenities = [];
+      
       if (booking.spot.images) {
         try {
           spotImages = typeof booking.spot.images === 'string' 
@@ -354,16 +399,31 @@ router.get('/', async function(req, res, next) {
           spotImages = [];
         }
       }
+
+      if (booking.spot.amenities) {
+        try {
+          spotAmenities = typeof booking.spot.amenities === 'string' 
+            ? JSON.parse(booking.spot.amenities) 
+            : booking.spot.amenities;
+        } catch (e) {
+          console.warn('Failed to parse spot amenities:', e);
+          spotAmenities = [];
+        }
+      }
       
       return {
         ...booking,
+        totalPrice: parseFloat(booking.totalPrice),
         spot: {
           ...booking.spot,
-          images: spotImages
+          price: parseFloat(booking.spot.price),
+          images: spotImages,
+          amenities: spotAmenities
         },
         nights,
         pricePerNight: parseFloat(booking.totalPrice) / nights,
-        canCancel: canCancelBooking(booking)
+        canCancel: canCancelBooking(booking),
+        canReview: canReviewBooking(booking)
       };
     });
 
@@ -404,7 +464,8 @@ router.get('/:id', async function(req, res, next) {
               select: {
                 firstName: true,
                 lastName: true,
-                email: true
+                email: true,
+                phone: true
               }
             }
           }
@@ -449,14 +510,17 @@ router.get('/:id', async function(req, res, next) {
 
     const enrichedBooking = {
       ...booking,
+      totalPrice: parseFloat(booking.totalPrice),
       spot: {
         ...booking.spot,
+        price: parseFloat(booking.spot.price),
         images: spotImages,
         amenities: spotAmenities
       },
       nights,
       pricePerNight: parseFloat(booking.totalPrice) / nights,
-      canCancel: canCancelBooking(booking)
+      canCancel: canCancelBooking(booking),
+      canReview: canReviewBooking(booking)
     };
 
     res.json({ 
@@ -510,6 +574,12 @@ router.put('/:id/cancel', async function(req, res, next) {
       });
     }
 
+    if (booking.status === 'REFUNDED') {
+      return res.status(400).json({
+        message: 'Cannot cancel a refunded booking'
+      });
+    }
+
     // Check if booking can still be cancelled
     if (!canCancelBooking(booking)) {
       return res.status(400).json({
@@ -517,10 +587,14 @@ router.put('/:id/cancel', async function(req, res, next) {
       });
     }
 
+    // Determine if refund is applicable
+    const paymentStatus = booking.paymentStatus === 'PAID' ? 'REFUNDED' : booking.paymentStatus;
+
     const updatedBooking = await req.prisma.booking.update({
       where: { id: bookingId },
       data: { 
         status: 'CANCELLED',
+        paymentStatus: paymentStatus,
         notes: reason ? `Cancelled: ${reason}` : booking.notes,
         updatedAt: new Date()
       }
@@ -528,13 +602,92 @@ router.put('/:id/cancel', async function(req, res, next) {
 
     res.json({
       message: 'Booking cancelled successfully',
-      booking: updatedBooking
+      booking: {
+        ...updatedBooking,
+        totalPrice: parseFloat(updatedBooking.totalPrice)
+      }
     });
 
   } catch (error) {
     console.error('Error cancelling booking:', error);
     res.status(500).json({
       message: 'Error cancelling booking',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* PUT /api/bookings/:id/payment - Update payment status */
+router.put('/:id/payment', async function(req, res, next) {
+  try {
+    const bookingId = parseInt(req.params.id);
+    const { paymentStatus, paymentMethod, transactionId } = req.body;
+    
+    if (isNaN(bookingId)) {
+      return res.status(400).json({
+        message: 'Invalid booking ID'
+      });
+    }
+
+    // Validate payment status
+    const validPaymentStatuses = ['PENDING', 'PAID', 'FAILED', 'REFUNDED'];
+    if (!paymentStatus || !validPaymentStatuses.includes(paymentStatus.toUpperCase())) {
+      return res.status(400).json({
+        message: 'Valid payment status is required (PENDING, PAID, FAILED, REFUNDED)'
+      });
+    }
+    
+    const booking = await req.prisma.booking.findFirst({
+      where: {
+        id: bookingId,
+        userId: req.user.userId
+      }
+    });
+
+    if (!booking) {
+      return res.status(404).json({
+        message: 'Booking not found'
+      });
+    }
+
+    const updateData = {
+      paymentStatus: paymentStatus.toUpperCase(),
+      updatedAt: new Date()
+    };
+
+    // If payment is successful, confirm the booking
+    if (paymentStatus.toUpperCase() === 'PAID' && booking.status === 'PENDING') {
+      updateData.status = 'CONFIRMED';
+    }
+
+    // Add payment notes if provided
+    if (paymentMethod || transactionId) {
+      const paymentInfo = [];
+      if (paymentMethod) paymentInfo.push(`Payment method: ${paymentMethod}`);
+      if (transactionId) paymentInfo.push(`Transaction ID: ${transactionId}`);
+      
+      updateData.notes = booking.notes 
+        ? `${booking.notes}\n${paymentInfo.join(', ')}`
+        : paymentInfo.join(', ');
+    }
+
+    const updatedBooking = await req.prisma.booking.update({
+      where: { id: bookingId },
+      data: updateData
+    });
+
+    res.json({
+      message: 'Payment status updated successfully',
+      booking: {
+        ...updatedBooking,
+        totalPrice: parseFloat(updatedBooking.totalPrice)
+      }
+    });
+
+  } catch (error) {
+    console.error('Error updating payment status:', error);
+    res.status(500).json({
+      message: 'Error updating payment status',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -573,7 +726,7 @@ router.post('/:id/review', async function(req, res, next) {
       });
     }
 
-    if (booking.status !== 'COMPLETED') {
+    if (!canReviewBooking(booking)) {
       return res.status(400).json({
         message: 'Reviews can only be added for completed bookings'
       });
@@ -601,6 +754,20 @@ router.post('/:id/review', async function(req, res, next) {
         rating: ratingNum,
         comment: comment?.trim() || null,
         isVerified: true
+      },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+            avatar: true
+          }
+        },
+        spot: {
+          select: {
+            title: true
+          }
+        }
       }
     });
 
@@ -625,7 +792,12 @@ function canCancelBooking(booking, hoursBeforeCheckIn = 24) {
   const hoursUntilCheckIn = (checkInDate - now) / (1000 * 60 * 60);
   
   return hoursUntilCheckIn >= hoursBeforeCheckIn && 
-         !['CANCELLED', 'COMPLETED'].includes(booking.status);
+         !['CANCELLED', 'COMPLETED', 'REFUNDED'].includes(booking.status);
+}
+
+// Helper function to check if booking can be reviewed
+function canReviewBooking(booking) {
+  return booking.status === 'COMPLETED' && booking.paymentStatus === 'PAID';
 }
 
 module.exports = router;

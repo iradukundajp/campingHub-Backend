@@ -31,7 +31,8 @@ router.get('/', function(req, res, next) {
   res.json({ 
     message: 'CampingHub API is running!',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    version: '1.0.0'
   });
 });
 
@@ -40,12 +41,14 @@ router.get('/test-db', async function(req, res, next) {
   try {
     const userCount = await req.prisma.user.count();
     const spotCount = await req.prisma.campingSpot.count();
+    const bookingCount = await req.prisma.booking.count();
     
     res.json({
       message: 'Database connection successful',
       counts: {
         users: userCount,
-        campingSpots: spotCount
+        campingSpots: spotCount,
+        bookings: bookingCount
       },
       timestamp: new Date().toISOString()
     });
@@ -60,7 +63,7 @@ router.get('/test-db', async function(req, res, next) {
 
 /* ===== AUTHENTICATION ROUTES ===== */
 
-/* POST login - FIXED: Removed lastLogin update */
+/* POST login */
 router.post('/auth/login', async function(req, res, next) {
   try {
     const { email, password } = req.body;
@@ -108,8 +111,6 @@ router.post('/auth/login', async function(req, res, next) {
       { expiresIn: '7d' }
     );
 
-    // Note: Removed lastLogin update to keep authentication simple
-
     // Remove password from response
     const { password: _, ...userWithoutPassword } = user;
 
@@ -131,18 +132,33 @@ router.post('/auth/login', async function(req, res, next) {
 /* POST register */
 router.post('/auth/register', async function(req, res, next) {
   try {
-    const { firstName, lastName, email, password, role = 'USER' } = req.body;
+    const { 
+      firstName, 
+      lastName, 
+      email, 
+      password, 
+      phone,
+      role = 'USER' 
+    } = req.body;
 
     // Validation
     if (!firstName || !lastName || !email || !password) {
       return res.status(400).json({
-        message: 'All fields are required'
+        message: 'First name, last name, email, and password are required'
       });
     }
 
     if (password.length < 6) {
       return res.status(400).json({
         message: 'Password must be at least 6 characters long'
+      });
+    }
+
+    // Email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        message: 'Please provide a valid email address'
       });
     }
 
@@ -160,16 +176,24 @@ router.post('/auth/register', async function(req, res, next) {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
 
+    // Create user data
+    const userData = {
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      email: email.toLowerCase().trim(),
+      password: hashedPassword,
+      role: role.toUpperCase(),
+      isActive: true
+    };
+
+    // Add phone if provided
+    if (phone && phone.trim()) {
+      userData.phone = phone.trim();
+    }
+
     // Create user
     const user = await req.prisma.user.create({
-      data: {
-        firstName: firstName.trim(),
-        lastName: lastName.trim(),
-        email: email.toLowerCase().trim(),
-        password: hashedPassword,
-        role: role.toUpperCase(),
-        isActive: true
-      }
+      data: userData
     });
 
     // Generate JWT token
@@ -211,9 +235,19 @@ router.get('/auth/me', authenticateToken, async function(req, res, next) {
         firstName: true,
         lastName: true,
         email: true,
+        phone: true,
+        avatar: true,
         role: true,
         isActive: true,
-        createdAt: true
+        isVerified: true,
+        createdAt: true,
+        _count: {
+          select: {
+            ownedSpots: true,
+            bookings: true,
+            reviews: true
+          }
+        }
       }
     });
 
@@ -239,7 +273,7 @@ router.get('/auth/me', authenticateToken, async function(req, res, next) {
 /* PUT update user profile */
 router.put('/auth/profile', authenticateToken, async function(req, res, next) {
   try {
-    const { firstName, lastName, email } = req.body;
+    const { firstName, lastName, email, phone, avatar } = req.body;
     const updateData = {};
 
     // Validate and prepare update data
@@ -286,6 +320,14 @@ router.put('/auth/profile', authenticateToken, async function(req, res, next) {
       updateData.email = email.toLowerCase();
     }
 
+    if (phone !== undefined) {
+      updateData.phone = phone ? phone.trim() : null;
+    }
+
+    if (avatar !== undefined) {
+      updateData.avatar = avatar ? avatar.trim() : null;
+    }
+
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({
         message: 'No valid fields provided for update'
@@ -302,6 +344,8 @@ router.put('/auth/profile', authenticateToken, async function(req, res, next) {
         email: true,
         firstName: true,
         lastName: true,
+        phone: true,
+        avatar: true,
         role: true,
         updatedAt: true
       }
@@ -329,6 +373,8 @@ router.get('/spots', async function(req, res, next) {
     const { 
       search, 
       location, 
+      city,
+      state,
       minPrice, 
       maxPrice, 
       capacity,
@@ -357,13 +403,25 @@ router.get('/spots', async function(req, res, next) {
       where.OR = [
         { title: { contains: searchTerm, mode: 'insensitive' } },
         { description: { contains: searchTerm, mode: 'insensitive' } },
-        { location: { contains: searchTerm, mode: 'insensitive' } }
+        { location: { contains: searchTerm, mode: 'insensitive' } },
+        { city: { contains: searchTerm, mode: 'insensitive' } },
+        { state: { contains: searchTerm, mode: 'insensitive' } }
       ];
     }
 
     // Add location filter
     if (location && location.trim()) {
       where.location = { contains: location.trim(), mode: 'insensitive' };
+    }
+
+    // Add city filter
+    if (city && city.trim()) {
+      where.city = { contains: city.trim(), mode: 'insensitive' };
+    }
+
+    // Add state filter
+    if (state && state.trim()) {
+      where.state = { contains: state.trim(), mode: 'insensitive' };
     }
 
     // Add price filters with validation
@@ -391,23 +449,20 @@ router.get('/spots', async function(req, res, next) {
       }
     }
 
-    // Add category filter
+    // Add category filter (search in amenities)
     if (category && category.trim()) {
-      where.amenities = { contains: category.trim(), mode: 'insensitive' };
+      where.amenities = { 
+        string_contains: category.trim()
+      };
     }
 
     // Build orderBy clause with validation
     let orderBy = { createdAt: 'desc' };
-    const validSortFields = ['createdAt', 'price', 'title', 'capacity', 'averageRating'];
+    const validSortFields = ['createdAt', 'price', 'title', 'capacity'];
     const validSortOrders = ['asc', 'desc'];
     
     if (validSortFields.includes(sortBy) && validSortOrders.includes(sortOrder.toLowerCase())) {
-      if (sortBy === 'averageRating') {
-        // Special handling for averageRating - we'll sort after calculating
-        orderBy = null;
-      } else {
-        orderBy = { [sortBy]: sortOrder.toLowerCase() };
-      }
+      orderBy = { [sortBy]: sortOrder.toLowerCase() };
     }
 
     let spots, total;
@@ -434,12 +489,9 @@ router.get('/spots', async function(req, res, next) {
               reviews: true
             }
           }
-        }
+        },
+        orderBy
       };
-
-      if (orderBy) {
-        queryOptions.orderBy = orderBy;
-      }
 
       [spots, total] = await Promise.all([
         req.prisma.campingSpot.findMany(queryOptions),
@@ -464,6 +516,11 @@ router.get('/spots', async function(req, res, next) {
         title: spot.title,
         description: spot.description,
         location: spot.location,
+        address: spot.address,
+        city: spot.city,
+        state: spot.state,
+        country: spot.country,
+        zipCode: spot.zipCode,
         price: parseFloat(spot.price),
         capacity: spot.capacity,
         latitude: spot.latitude,
@@ -472,6 +529,7 @@ router.get('/spots', async function(req, res, next) {
         isInstantBook: spot.isInstantBook,
         amenities: parsedAmenities,
         images: parsedImages,
+        rules: spot.rules,
         averageRating: avgRating,
         totalReviews: spot.reviews.length,
         totalBookings: spot._count.bookings,
@@ -506,6 +564,8 @@ router.get('/spots', async function(req, res, next) {
       filters: {
         search,
         location,
+        city,
+        state,
         minPrice,
         maxPrice,
         capacity,
@@ -525,7 +585,7 @@ router.get('/spots', async function(req, res, next) {
   }
 });
 
-/* GET single camping spot - FIXED: Removed booking status filter */
+/* GET single camping spot */
 router.get('/spots/:id', async function(req, res, next) {
   try {
     const { id } = req.params;
@@ -541,7 +601,8 @@ router.get('/spots/:id', async function(req, res, next) {
             id: true,
             firstName: true,
             lastName: true,
-            email: true
+            email: true,
+            phone: true
           }
         },
         reviews: {
@@ -549,7 +610,8 @@ router.get('/spots/:id', async function(req, res, next) {
             user: {
               select: {
                 firstName: true,
-                lastName: true
+                lastName: true,
+                avatar: true
               }
             }
           },
@@ -562,8 +624,12 @@ router.get('/spots/:id', async function(req, res, next) {
             checkIn: true,
             checkOut: true,
             status: true
+          },
+          where: {
+            status: {
+              in: ['CONFIRMED', 'PENDING']
+            }
           }
-          // Removed status filter to avoid enum mismatch
         },
         _count: {
           select: {
@@ -585,16 +651,16 @@ router.get('/spots/:id', async function(req, res, next) {
     const parsedImages = parseJsonField(spot.images);
     const avgRating = calculateAverageRating(spot.reviews);
 
-    // Filter confirmed bookings manually for unavailable dates
-    const confirmedBookings = spot.bookings.filter(booking => 
-      booking.status === 'CONFIRMED' || booking.status === 'CHECKED_IN'
-    );
-
     const spotWithDetails = {
       id: spot.id,
       title: spot.title,
       description: spot.description,
       location: spot.location,
+      address: spot.address,
+      city: spot.city,
+      state: spot.state,
+      country: spot.country,
+      zipCode: spot.zipCode,
       price: parseFloat(spot.price),
       capacity: spot.capacity,
       latitude: spot.latitude,
@@ -603,12 +669,13 @@ router.get('/spots/:id', async function(req, res, next) {
       isInstantBook: spot.isInstantBook,
       amenities: parsedAmenities,
       images: parsedImages,
+      rules: spot.rules,
       averageRating: avgRating,
       totalReviews: spot.reviews.length,
       totalBookings: spot._count.bookings,
       owner: spot.owner,
       reviews: spot.reviews,
-      unavailableDates: confirmedBookings.map(booking => ({
+      unavailableDates: spot.bookings.map(booking => ({
         checkIn: booking.checkIn,
         checkOut: booking.checkOut
       })),
@@ -636,12 +703,18 @@ router.post('/spots', authenticateToken, authorizeRole(['OWNER', 'ADMIN']), asyn
       title,
       description,
       location,
+      address,
+      city,
+      state,
+      country = 'USA',
+      zipCode,
       price,
       capacity,
       latitude,
       longitude,
       amenities = [],
       images = [],
+      rules,
       isInstantBook = false
     } = req.body;
 
@@ -664,21 +737,31 @@ router.post('/spots', authenticateToken, authorizeRole(['OWNER', 'ADMIN']), asyn
       });
     }
 
+    const spotData = {
+      title: title.trim(),
+      description: description.trim(),
+      location: location.trim(),
+      price: parseFloat(price),
+      capacity: parseInt(capacity),
+      isInstantBook: Boolean(isInstantBook),
+      isActive: true,
+      ownerId: req.user.userId
+    };
+
+    // Add optional fields
+    if (address) spotData.address = address.trim();
+    if (city) spotData.city = city.trim();
+    if (state) spotData.state = state.trim();
+    if (country) spotData.country = country.trim();
+    if (zipCode) spotData.zipCode = zipCode.trim();
+    if (rules) spotData.rules = rules.trim();
+    if (latitude) spotData.latitude = parseFloat(latitude);
+    if (longitude) spotData.longitude = parseFloat(longitude);
+    if (amenities) spotData.amenities = amenities;
+    if (images) spotData.images = images;
+
     const spot = await req.prisma.campingSpot.create({
-      data: {
-        title: title.trim(),
-        description: description.trim(),
-        location: location.trim(),
-        price: parseFloat(price),
-        capacity: parseInt(capacity),
-        latitude: latitude ? parseFloat(latitude) : null,
-        longitude: longitude ? parseFloat(longitude) : null,
-        amenities: JSON.stringify(amenities),
-        images: JSON.stringify(images),
-        isInstantBook: Boolean(isInstantBook),
-        isActive: true,
-        ownerId: req.user.userId
-      },
+      data: spotData,
       include: {
         owner: {
           select: {
@@ -721,12 +804,18 @@ router.put('/spots/:id', authenticateToken, async function(req, res, next) {
       title,
       description,
       location,
+      address,
+      city,
+      state,
+      country,
+      zipCode,
       price,
       capacity,
       latitude,
       longitude,
       amenities,
       images,
+      rules,
       isInstantBook,
       isActive
     } = req.body;
@@ -755,6 +844,13 @@ router.put('/spots/:id', authenticateToken, async function(req, res, next) {
     if (title !== undefined) updateData.title = title.trim();
     if (description !== undefined) updateData.description = description.trim();
     if (location !== undefined) updateData.location = location.trim();
+    if (address !== undefined) updateData.address = address ? address.trim() : null;
+    if (city !== undefined) updateData.city = city ? city.trim() : null;
+    if (state !== undefined) updateData.state = state ? state.trim() : null;
+    if (country !== undefined) updateData.country = country ? country.trim() : null;
+    if (zipCode !== undefined) updateData.zipCode = zipCode ? zipCode.trim() : null;
+    if (rules !== undefined) updateData.rules = rules ? rules.trim() : null;
+    
     if (price !== undefined) {
       const priceValue = parseFloat(price);
       if (priceValue <= 0) {
@@ -764,6 +860,7 @@ router.put('/spots/:id', authenticateToken, async function(req, res, next) {
       }
       updateData.price = priceValue;
     }
+    
     if (capacity !== undefined) {
       const capacityValue = parseInt(capacity);
       if (capacityValue <= 0) {
@@ -773,10 +870,11 @@ router.put('/spots/:id', authenticateToken, async function(req, res, next) {
       }
       updateData.capacity = capacityValue;
     }
+    
     if (latitude !== undefined) updateData.latitude = latitude ? parseFloat(latitude) : null;
     if (longitude !== undefined) updateData.longitude = longitude ? parseFloat(longitude) : null;
-    if (amenities !== undefined) updateData.amenities = JSON.stringify(amenities);
-    if (images !== undefined) updateData.images = JSON.stringify(images);
+    if (amenities !== undefined) updateData.amenities = amenities;
+    if (images !== undefined) updateData.images = images;
     if (isInstantBook !== undefined) updateData.isInstantBook = Boolean(isInstantBook);
     if (isActive !== undefined && req.user.role === 'ADMIN') {
       updateData.isActive = Boolean(isActive);
