@@ -2,6 +2,31 @@ var express = require('express');
 var router = express.Router();
 const { authenticateToken } = require('../middleware/auth');
 
+// 🆕 FIXED: Safe JSON parsing helper function
+function safeParseJSON(jsonString, fallback = []) {
+  if (!jsonString) return fallback;
+  
+  // If it's already an array/object, return it
+  if (typeof jsonString !== 'string') {
+    return Array.isArray(jsonString) ? jsonString : fallback;
+  }
+  
+  // If it's a string, try to parse it
+  try {
+    const parsed = JSON.parse(jsonString);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch (error) {
+    console.warn('JSON parsing failed for:', jsonString, 'Error:', error.message);
+    
+    // If it looks like a single URL, wrap it in an array
+    if (jsonString.startsWith('http') || jsonString.startsWith('/uploads/')) {
+      return [jsonString];
+    }
+    
+    return fallback;
+  }
+}
+
 // Middleware to check if user is an admin
 const requireAdmin = (req, res, next) => {
   if (req.user.role !== 'ADMIN') {
@@ -19,6 +44,13 @@ router.use(requireAdmin);
 /* GET /api/admin/dashboard - Admin Dashboard Stats */
 router.get('/dashboard', async function(req, res, next) {
   try {
+    console.log('🔐 Auth successful:', {
+      userId: req.user.userId,
+      email: req.user.email,
+      role: req.user.role,
+      endpoint: '/api/admin/dashboard'
+    });
+
     // Get overview statistics
     const [
       userCount, 
@@ -109,13 +141,15 @@ router.get('/dashboard', async function(req, res, next) {
       nights: Math.ceil((new Date(booking.checkOut) - new Date(booking.checkIn)) / (1000 * 60 * 60 * 24))
     }));
 
-    // Format recent spots with computed data
+    // 🆕 FIXED: Format recent spots with safe JSON parsing
     const formattedRecentSpots = recentSpots.map(spot => ({
       ...spot,
       price: parseFloat(spot.price),
-      images: spot.images ? JSON.parse(spot.images) : [],
-      amenities: spot.amenities ? JSON.parse(spot.amenities) : []
+      images: safeParseJSON(spot.images, []), // 🆕 FIXED: Safe parsing
+      amenities: safeParseJSON(spot.amenities, []) // 🆕 FIXED: Safe parsing
     }));
+
+    console.log('✅ Dashboard data prepared successfully');
 
     res.json({
       message: 'Dashboard data retrieved successfully',
@@ -152,7 +186,7 @@ router.get('/dashboard', async function(req, res, next) {
     });
 
   } catch (error) {
-    console.error('Admin dashboard error:', error);
+    console.error('❌ Admin dashboard error:', error);
     res.status(500).json({
       message: 'Error fetching dashboard data',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -416,12 +450,12 @@ router.get('/spots', async function(req, res, next) {
       req.prisma.campingSpot.count({ where })
     ]);
 
-    // Process spots
+    // 🆕 FIXED: Process spots with safe JSON parsing
     const processedSpots = spots.map(spot => ({
       ...spot,
       price: parseFloat(spot.price),
-      images: spot.images ? JSON.parse(spot.images) : [],
-      amenities: spot.amenities ? JSON.parse(spot.amenities) : [],
+      images: safeParseJSON(spot.images, []), // 🆕 FIXED: Safe parsing
+      amenities: safeParseJSON(spot.amenities, []), // 🆕 FIXED: Safe parsing
       totalBookings: spot._count.bookings,
       totalReviews: spot._count.reviews
     }));
@@ -493,8 +527,8 @@ router.put('/spots/:id', async function(req, res, next) {
       spot: {
         ...updatedSpot,
         price: parseFloat(updatedSpot.price),
-        images: updatedSpot.images ? JSON.parse(updatedSpot.images) : [],
-        amenities: updatedSpot.amenities ? JSON.parse(updatedSpot.amenities) : []
+        images: safeParseJSON(updatedSpot.images, []), // 🆕 FIXED: Safe parsing
+        amenities: safeParseJSON(updatedSpot.amenities, []) // 🆕 FIXED: Safe parsing
       }
     });
 
