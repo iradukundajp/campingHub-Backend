@@ -2,11 +2,64 @@ var express = require('express');
 var router = express.Router();
 const { authenticateToken, requireOwner } = require('../middleware/auth');
 
+// Helper function to convert relative image URLs to full URLs
+function fixImageUrls(req, images) {
+  if (!images || !Array.isArray(images)) return images;
+  
+  return images.map(url => {
+    // If it's already a full URL (external or already processed), return as is
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    
+    // If it's a relative path to uploads, convert to full URL
+    if (url.startsWith('/uploads/')) {
+      const protocol = req.protocol;
+      const host = req.get('host');
+      return `${protocol}://${host}${url}`;
+    }
+    
+    // If it's just the filename, add the full path
+    if (url.includes('camping-') && !url.includes('/')) {
+      const protocol = req.protocol;
+      const host = req.get('host');
+      return `${protocol}://${host}/uploads/${url}`;
+    }
+    
+    return url;
+  });
+}
+
+// 🆕 FIXED: Safe JSON parsing helper function
+function safeParseJSON(jsonString, fallback = []) {
+  if (!jsonString) return fallback;
+  
+  // If it's already an array/object, return it
+  if (typeof jsonString !== 'string') {
+    return Array.isArray(jsonString) ? jsonString : fallback;
+  }
+  
+  // If it's a string, try to parse it
+  try {
+    const parsed = JSON.parse(jsonString);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch (error) {
+    console.warn('JSON parsing failed for:', jsonString, 'Error:', error.message);
+    
+    // If it looks like a single URL, wrap it in an array
+    if (jsonString.startsWith('http') || jsonString.startsWith('/uploads/')) {
+      return [jsonString];
+    }
+    
+    return fallback;
+  }
+}
+
 // Apply authentication to all owner routes
 router.use(authenticateToken);
 router.use(requireOwner);
 
-/* GET /api/owners/spots - Get all camping spots owned by the current user */
+/* 🆕 FIXED: GET /api/owners/spots - Get all camping spots owned by the current user */
 router.get('/spots', async function(req, res, next) {
   try {
     const { status, search, page = 1, limit = 20 } = req.query;
@@ -59,7 +112,7 @@ router.get('/spots', async function(req, res, next) {
       req.prisma.campingSpot.count({ where })
     ]);
 
-    // Calculate average rating for each spot
+    // 🆕 FIXED: Calculate average rating for each spot with safe JSON parsing
     const spotsWithStats = spots.map(spot => {
       const avgRating = spot.reviews.length > 0 
         ? spot.reviews.reduce((sum, review) => sum + review.rating, 0) / spot.reviews.length
@@ -68,8 +121,8 @@ router.get('/spots', async function(req, res, next) {
       return {
         ...spot,
         price: parseFloat(spot.price),
-        images: spot.images ? JSON.parse(spot.images) : [],
-        amenities: spot.amenities ? JSON.parse(spot.amenities) : [],
+        images: safeParseJSON(spot.images, []), // 🆕 FIXED: Safe JSON parsing
+        amenities: safeParseJSON(spot.amenities, []), // 🆕 FIXED: Safe JSON parsing
         averageRating: Math.round(avgRating * 10) / 10,
         totalReviews: spot.reviews.length,
         totalBookings: spot._count.bookings
@@ -139,6 +192,9 @@ router.post('/spots', async function(req, res, next) {
       });
     }
 
+    // Fix image URLs before saving to database
+    const fixedImages = fixImageUrls(req, images);
+
     const spotData = {
       title: title.trim(),
       description: description.trim(),
@@ -158,7 +214,7 @@ router.post('/spots', async function(req, res, next) {
     if (zipCode) spotData.zipCode = zipCode.trim();
     if (rules) spotData.rules = rules.trim();
     if (amenities) spotData.amenities = amenities;
-    if (images) spotData.images = images;
+    if (fixedImages) spotData.images = fixedImages; // Use fixed URLs
     if (latitude) spotData.latitude = parseFloat(latitude);
     if (longitude) spotData.longitude = parseFloat(longitude);
 
@@ -175,13 +231,15 @@ router.post('/spots', async function(req, res, next) {
       }
     });
 
+    console.log(`🏕️ New camping spot created by owner ${req.user.userId}: ${title}`);
+
     res.status(201).json({
       message: 'Camping spot created successfully',
       spot: {
         ...newSpot,
         price: parseFloat(newSpot.price),
-        images: newSpot.images ? JSON.parse(newSpot.images) : [],
-        amenities: newSpot.amenities ? JSON.parse(newSpot.amenities) : []
+        images: safeParseJSON(newSpot.images, []), // 🆕 FIXED: Safe JSON parsing
+        amenities: safeParseJSON(newSpot.amenities, []) // 🆕 FIXED: Safe JSON parsing
       }
     });
 
@@ -271,7 +329,12 @@ router.put('/spots/:id', async function(req, res, next) {
     }
     
     if (amenities !== undefined) updateData.amenities = amenities;
-    if (images !== undefined) updateData.images = images;
+    
+    // Fix image URLs if images are being updated
+    if (images !== undefined) {
+      updateData.images = fixImageUrls(req, images);
+    }
+    
     if (latitude !== undefined) updateData.latitude = latitude ? parseFloat(latitude) : null;
     if (longitude !== undefined) updateData.longitude = longitude ? parseFloat(longitude) : null;
     if (isActive !== undefined) updateData.isActive = Boolean(isActive);
@@ -290,13 +353,15 @@ router.put('/spots/:id', async function(req, res, next) {
       data: updateData
     });
 
+    console.log(`🏕️ Camping spot updated by owner ${req.user.userId}: ${updatedSpot.title}`);
+
     res.json({
       message: 'Camping spot updated successfully',
       spot: {
         ...updatedSpot,
         price: parseFloat(updatedSpot.price),
-        images: updatedSpot.images ? JSON.parse(updatedSpot.images) : [],
-        amenities: updatedSpot.amenities ? JSON.parse(updatedSpot.amenities) : []
+        images: safeParseJSON(updatedSpot.images, []), // 🆕 FIXED: Safe JSON parsing
+        amenities: safeParseJSON(updatedSpot.amenities, []) // 🆕 FIXED: Safe JSON parsing
       }
     });
 
@@ -375,7 +440,7 @@ router.delete('/spots/:id', async function(req, res, next) {
   }
 });
 
-/* GET /api/owners/bookings - Get all bookings for owner's spots */
+/* 🆕 FIXED: GET /api/owners/bookings - Get all bookings for owner's spots */
 router.get('/bookings', async function(req, res, next) {
   try {
     const { status, paymentStatus, page = 1, limit = 20 } = req.query;
@@ -428,7 +493,8 @@ router.get('/bookings', async function(req, res, next) {
               location: true,
               city: true,
               state: true,
-              price: true
+              price: true,
+              images: true // Include images to test parsing
             }
           }
         },
@@ -439,7 +505,7 @@ router.get('/bookings', async function(req, res, next) {
       req.prisma.booking.count({ where })
     ]);
 
-    // Process bookings with computed data
+    // 🆕 FIXED: Process bookings with computed data and safe JSON parsing
     const processedBookings = bookings.map(booking => {
       const checkIn = new Date(booking.checkIn);
       const checkOut = new Date(booking.checkOut);
@@ -450,7 +516,8 @@ router.get('/bookings', async function(req, res, next) {
         totalPrice: parseFloat(booking.totalPrice),
         spot: {
           ...booking.spot,
-          price: parseFloat(booking.spot.price)
+          price: parseFloat(booking.spot.price),
+          images: safeParseJSON(booking.spot.images, []) // 🆕 FIXED: Safe JSON parsing
         },
         nights,
         pricePerNight: parseFloat(booking.totalPrice) / nights

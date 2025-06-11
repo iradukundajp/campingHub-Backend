@@ -1,102 +1,212 @@
 const jwt = require('jsonwebtoken');
 
-// Middleware to verify JWT token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+// 🆕 ENHANCED: Middleware to verify JWT token with better debugging
+const authenticateToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
-  if (!token) {
-    return res.status(401).json({ 
-      message: 'Access token required',
-      code: 'TOKEN_MISSING'
-    });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      let message = 'Invalid or expired token';
-      let code = 'TOKEN_INVALID';
-      
-      if (err.name === 'TokenExpiredError') {
-        message = 'Token has expired';
-        code = 'TOKEN_EXPIRED';
-      } else if (err.name === 'JsonWebTokenError') {
-        message = 'Invalid token format';
-        code = 'TOKEN_MALFORMED';
-      }
-      
-      return res.status(403).json({ 
-        message,
-        code
-      });
-    }
-    
-    req.user = user;
-    next();
-  });
-};
-
-// Middleware to check if user is an owner
-const requireOwner = (req, res, next) => {
-  if (!req.user || !req.user.role) {
-    return res.status(401).json({ 
-      message: 'Authentication required',
-      code: 'AUTH_REQUIRED'
-    });
-  }
-  
-  if (req.user.role !== 'OWNER' && req.user.role !== 'ADMIN') {
-    return res.status(403).json({ 
-      message: 'Access denied. Owner privileges required.',
-      code: 'INSUFFICIENT_PERMISSIONS',
-      required: ['OWNER', 'ADMIN'],
-      current: req.user.role
-    });
-  }
-  next();
-};
-
-// Middleware to check if user is an admin
-const requireAdmin = (req, res, next) => {
-  if (!req.user || !req.user.role) {
-    return res.status(401).json({ 
-      message: 'Authentication required',
-      code: 'AUTH_REQUIRED'
-    });
-  }
-  
-  if (req.user.role !== 'ADMIN') {
-    return res.status(403).json({ 
-      message: 'Access denied. Admin privileges required.',
-      code: 'INSUFFICIENT_PERMISSIONS',
-      required: ['ADMIN'],
-      current: req.user.role
-    });
-  }
-  next();
-};
-
-// Flexible middleware to authorize multiple roles
-const authorizeRole = (allowedRoles) => {
-  return (req, res, next) => {
-    if (!req.user || !req.user.role) {
+    if (!token) {
       return res.status(401).json({ 
-        message: 'Authentication required',
-        code: 'AUTH_REQUIRED'
+        message: 'Access token required',
+        code: 'TOKEN_MISSING'
       });
     }
 
-    if (!allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({ 
-        message: `Access denied. Required roles: ${allowedRoles.join(', ')}`,
-        code: 'INSUFFICIENT_PERMISSIONS',
-        required: allowedRoles,
-        current: req.user.role
+    // 🆕 ENHANCED: Better JWT verification with user data extraction
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    
+    // 🆕 ENHANCED: Support both userId and id fields for compatibility
+    req.user = {
+      userId: decoded.userId || decoded.id, // Support both formats
+      email: decoded.email,
+      role: decoded.role,
+      isActive: decoded.isActive !== false // Default to true if not specified
+    };
+
+    // 🆕 ENHANCED: Development logging for debugging
+    if (process.env.NODE_ENV === 'development') {
+      console.log('🔐 Auth successful:', {
+        userId: req.user.userId,
+        email: req.user.email,
+        role: req.user.role,
+        endpoint: req.originalUrl
       });
     }
-    
+
+    // 🆕 ENHANCED: Check if user account is active
+    if (req.user.isActive === false) {
+      return res.status(403).json({
+        message: 'Account is deactivated',
+        code: 'ACCOUNT_INACTIVE'
+      });
+    }
+
     next();
+  } catch (error) {
+    console.error('Authentication error:', error);
+    
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        message: 'Invalid access token',
+        code: 'TOKEN_INVALID'
+      });
+    } else if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        message: 'Access token expired',
+        code: 'TOKEN_EXPIRED'
+      });
+    } else {
+      return res.status(500).json({
+        message: 'Authentication verification failed',
+        code: 'AUTH_ERROR',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+};
+
+// 🆕 ENHANCED: Middleware to check if user is an owner with better debugging
+const requireOwner = async (req, res, next) => {
+  try {
+    // Check if user is authenticated first
+    if (!req.user) {
+      return res.status(401).json({
+        message: 'Authentication required',
+        code: 'NOT_AUTHENTICATED'
+      });
+    }
+
+    const userRole = req.user.role;
+    
+    // Allow OWNER and ADMIN roles
+    if (userRole === 'OWNER' || userRole === 'ADMIN') {
+      // 🆕 ENHANCED: Log access for monitoring in development
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`🏠 Owner access granted: ${req.user.email} (${userRole}) accessing ${req.originalUrl}`);
+      }
+      next();
+    } else {
+      console.warn(`⚠️ Owner access denied: ${req.user.email} (${userRole}) attempted to access ${req.originalUrl}`);
+      return res.status(403).json({
+        message: 'Owner privileges required',
+        code: 'INSUFFICIENT_PRIVILEGES',
+        requiredRole: 'OWNER',
+        currentRole: userRole
+      });
+    }
+  } catch (error) {
+    console.error('Owner role check error:', error);
+    return res.status(500).json({
+      message: 'Role verification failed',
+      code: 'ROLE_CHECK_ERROR',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+// 🆕 ENHANCED: Middleware to check if user is an admin with better debugging
+const requireAdmin = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        message: 'Authentication required',
+        code: 'NOT_AUTHENTICATED'
+      });
+    }
+
+    const userRole = req.user.role;
+    
+    if (userRole === 'ADMIN') {
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`👑 Admin access granted: ${req.user.email} accessing ${req.originalUrl}`);
+      }
+      next();
+    } else {
+      console.warn(`⚠️ Admin access denied: ${req.user.email} (${userRole}) attempted to access ${req.originalUrl}`);
+      return res.status(403).json({
+        message: 'Administrator privileges required',
+        code: 'INSUFFICIENT_PRIVILEGES',
+        requiredRole: 'ADMIN',
+        currentRole: userRole
+      });
+    }
+  } catch (error) {
+    console.error('Admin role check error:', error);
+    return res.status(500).json({
+      message: 'Role verification failed',
+      code: 'ROLE_CHECK_ERROR',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+// 🆕 ENHANCED: Flexible middleware to authorize multiple roles
+const authorizeRole = (allowedRoles) => {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({
+          message: 'Authentication required',
+          code: 'NOT_AUTHENTICATED'
+        });
+      }
+
+      const userRole = req.user.role;
+      
+      if (allowedRoles.includes(userRole)) {
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`✅ Role access granted: ${req.user.email} (${userRole}) accessing ${req.originalUrl}`);
+        }
+        next();
+      } else {
+        console.warn(`⚠️ Role access denied: ${req.user.email} (${userRole}) attempted to access ${req.originalUrl}`);
+        return res.status(403).json({
+          message: 'Insufficient privileges',
+          code: 'INSUFFICIENT_PRIVILEGES',
+          allowedRoles,
+          currentRole: userRole
+        });
+      }
+    } catch (error) {
+      console.error('Role requirement check error:', error);
+      return res.status(500).json({
+        message: 'Role verification failed',
+        code: 'ROLE_CHECK_ERROR',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
   };
+};
+
+// 🆕 ENHANCED: Optional authentication middleware (for routes that work with or without auth)
+const optionalAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = {
+          userId: decoded.userId || decoded.id,
+          email: decoded.email,
+          role: decoded.role,
+          isActive: decoded.isActive !== false
+        };
+      } catch (error) {
+        // Token is invalid but that's okay for optional auth
+        if (process.env.NODE_ENV === 'development') {
+          console.log('Optional auth: Invalid token provided, proceeding without auth');
+        }
+      }
+    }
+
+    next();
+  } catch (error) {
+    console.error('Optional auth error:', error);
+    next(); // Continue without auth
+  }
 };
 
 // Middleware to check if user account is active
@@ -181,7 +291,7 @@ const requireVerifiedAccount = (req, res, next) => {
   });
 };
 
-// Middleware to check resource ownership
+// 🆕 ENHANCED: Middleware to check ownership of resources with better error handling
 const requireResourceOwnership = (resourceType) => {
   return async (req, res, next) => {
     if (!req.user || !req.user.userId) {
@@ -337,12 +447,68 @@ const validateRequestSize = (maxSizeInMB = 10) => {
   };
 };
 
-// Logging middleware for authenticated requests
+// 🆕 ENHANCED: Logging middleware for authenticated requests with better debugging
 const logAuthenticatedRequest = (req, res, next) => {
-  if (req.user) {
+  if (req.user && process.env.NODE_ENV === 'development') {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} - User: ${req.user.userId} (${req.user.role})`);
   }
   next();
+};
+
+// 🆕 NEW: Health check middleware to verify middleware setup
+const healthCheck = (req, res, next) => {
+  req.healthCheck = {
+    timestamp: new Date().toISOString(),
+    middleware: 'auth',
+    version: '2.0.0'
+  };
+  next();
+};
+
+// 🆕 NEW: Middleware to ensure user data is fresh from database (for critical operations)
+const refreshUserData = async (req, res, next) => {
+  if (!req.user || !req.user.userId) {
+    return res.status(401).json({
+      message: 'Authentication required',
+      code: 'AUTH_REQUIRED'
+    });
+  }
+
+  try {
+    const user = await req.prisma.user.findUnique({
+      where: { id: req.user.userId },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        isActive: true,
+        isVerified: true
+      }
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: 'User not found',
+        code: 'USER_NOT_FOUND'
+      });
+    }
+
+    // Update req.user with fresh data
+    req.user = {
+      ...req.user,
+      role: user.role,
+      isActive: user.isActive,
+      isVerified: user.isVerified
+    };
+
+    next();
+  } catch (error) {
+    console.error('Error refreshing user data:', error);
+    return res.status(500).json({
+      message: 'Error refreshing user data',
+      code: 'USER_REFRESH_ERROR'
+    });
+  }
 };
 
 module.exports = {
@@ -350,10 +516,13 @@ module.exports = {
   requireOwner,
   requireAdmin,
   authorizeRole,
+  optionalAuth, // 🆕 NEW
   requireActiveAccount,
   requireVerifiedAccount,
   requireResourceOwnership,
   createRateLimiter,
   validateRequestSize,
-  logAuthenticatedRequest
+  logAuthenticatedRequest,
+  healthCheck, // 🆕 NEW
+  refreshUserData // 🆕 NEW
 };

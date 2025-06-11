@@ -4,17 +4,57 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { authenticateToken, authorizeRole } = require('../middleware/auth');
 
-// Helper function to parse JSON fields safely
+// 🆕 FIXED: Safe JSON parsing helper function
 function parseJsonField(field) {
   if (!field) return [];
-  if (typeof field === 'string') {
-    try {
-      return JSON.parse(field);
-    } catch (e) {
-      return [];
-    }
+  
+  // If it's already an array/object, return it
+  if (typeof field !== 'string') {
+    return Array.isArray(field) ? field : [];
   }
-  return Array.isArray(field) ? field : [];
+  
+  // If it's a string, try to parse it
+  try {
+    const parsed = JSON.parse(field);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.warn('JSON parsing failed for field:', field, 'Error:', error.message);
+    
+    // If it looks like a single URL, wrap it in an array
+    if (field.startsWith('http') || field.startsWith('/uploads/')) {
+      return [field];
+    }
+    
+    return [];
+  }
+}
+
+// Helper function to convert relative image URLs to full URLs
+function fixImageUrls(req, images) {
+  if (!images || !Array.isArray(images)) return images;
+  
+  return images.map(url => {
+    // If it's already a full URL (external or already processed), return as is
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    
+    // If it's a relative path to uploads, convert to full URL
+    if (url.startsWith('/uploads/')) {
+      const protocol = req.protocol;
+      const host = req.get('host');
+      return `${protocol}://${host}${url}`;
+    }
+    
+    // If it's just the filename, add the full path
+    if (url.includes('camping-') && !url.includes('/')) {
+      const protocol = req.protocol;
+      const host = req.get('host');
+      return `${protocol}://${host}/uploads/${url}`;
+    }
+    
+    return url;
+  });
 }
 
 // Helper function to calculate average rating
@@ -805,6 +845,9 @@ router.post('/spots', authenticateToken, authorizeRole(['OWNER', 'ADMIN']), asyn
       });
     }
 
+    // Fix image URLs before saving to database
+    const fixedImages = fixImageUrls(req, images);
+
     const spotData = {
       title: title.trim(),
       description: description.trim(),
@@ -826,7 +869,7 @@ router.post('/spots', authenticateToken, authorizeRole(['OWNER', 'ADMIN']), asyn
     if (latitude) spotData.latitude = parseFloat(latitude);
     if (longitude) spotData.longitude = parseFloat(longitude);
     if (amenities) spotData.amenities = amenities;
-    if (images) spotData.images = images;
+    if (fixedImages) spotData.images = fixedImages; // Use fixed URLs
 
     const spot = await req.prisma.campingSpot.create({
       data: spotData,
@@ -850,6 +893,8 @@ router.post('/spots', authenticateToken, authorizeRole(['OWNER', 'ADMIN']), asyn
       images: parsedImages,
       price: parseFloat(spot.price)
     };
+
+    console.log(`🏕️ New camping spot created by user ${req.user.userId}: ${title}`);
 
     res.status(201).json({
       message: 'Camping spot created successfully',
@@ -942,7 +987,12 @@ router.put('/spots/:id', authenticateToken, async function(req, res, next) {
     if (latitude !== undefined) updateData.latitude = latitude ? parseFloat(latitude) : null;
     if (longitude !== undefined) updateData.longitude = longitude ? parseFloat(longitude) : null;
     if (amenities !== undefined) updateData.amenities = amenities;
-    if (images !== undefined) updateData.images = images;
+    
+    // Fix image URLs if images are being updated
+    if (images !== undefined) {
+      updateData.images = fixImageUrls(req, images);
+    }
+    
     if (isInstantBook !== undefined) updateData.isInstantBook = Boolean(isInstantBook);
     if (isActive !== undefined && req.user.role === 'ADMIN') {
       updateData.isActive = Boolean(isActive);
@@ -973,6 +1023,8 @@ router.put('/spots/:id', authenticateToken, async function(req, res, next) {
       images: parsedImages,
       price: parseFloat(updatedSpot.price)
     };
+
+    console.log(`🏕️ Camping spot updated by user ${req.user.userId}: ${updatedSpot.title}`);
 
     res.json({
       message: 'Camping spot updated successfully',

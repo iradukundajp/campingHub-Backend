@@ -10,9 +10,12 @@ router.get('/', function(req, res, next) {
     endpoints: {
       profile: 'GET /api/users/profile (requires auth)',
       updateProfile: 'PUT /api/users/profile (requires auth)',
+      upgradeToOwner: 'PUT /api/users/upgrade-to-owner (requires auth)', // 🆕 NEW
       bookings: 'GET /api/users/bookings (requires auth)',
       reviews: 'GET /api/users/reviews (requires auth)',
-      favorites: 'GET /api/users/favorites (requires auth)'
+      stats: 'GET /api/users/stats (requires auth)',
+      verification: 'PUT /api/users/verification (requires auth)',
+      deleteAccount: 'DELETE /api/users/account (requires auth)'
     },
     note: 'Authentication endpoints are available at /api/auth/login and /api/auth/register'
   });
@@ -68,7 +71,7 @@ router.get('/profile', authenticateToken, async function(req, res, next) {
 /* PUT /api/users/profile - Update User Profile */
 router.put('/profile', authenticateToken, async function(req, res, next) {
   try {
-    const { firstName, lastName, phone, avatar } = req.body;
+    const { firstName, lastName, phone, avatar, role } = req.body;
     const updateData = {};
 
     // Validate and prepare update data
@@ -109,6 +112,35 @@ router.put('/profile', authenticateToken, async function(req, res, next) {
       updateData.avatar = avatar ? avatar.trim() : null;
     }
 
+    // 🆕 ENHANCED: Allow role updates for USER → OWNER upgrade
+    if (role !== undefined) {
+      const validRoles = ['USER', 'OWNER'];
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({
+          message: 'Invalid role. Allowed roles: USER, OWNER'
+        });
+      }
+      
+      // Get current user to check existing role
+      const currentUser = await req.prisma.user.findUnique({
+        where: { id: req.user.userId },
+        select: { role: true }
+      });
+      
+      // Only allow USER → OWNER upgrade (not OWNER → USER or ADMIN changes)
+      if (currentUser.role === 'USER' && role === 'OWNER') {
+        updateData.role = role;
+        console.log(`🔄 User ${req.user.userId} upgrading from USER to OWNER`);
+      } else if (currentUser.role === role) {
+        // Same role, no change needed
+        console.log(`ℹ️ User ${req.user.userId} already has role ${role}`);
+      } else {
+        return res.status(403).json({
+          message: 'Role change not permitted. Only USER to OWNER upgrade is allowed.'
+        });
+      }
+    }
+
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({
         message: 'No valid fields provided for update'
@@ -132,6 +164,11 @@ router.put('/profile', authenticateToken, async function(req, res, next) {
       }
     });
 
+    // Log role change for monitoring
+    if (updateData.role) {
+      console.log(`✅ Role update successful: User ${req.user.userId} is now ${updateData.role}`);
+    }
+
     res.json({
       message: 'Profile updated successfully',
       user: updatedUser
@@ -141,6 +178,97 @@ router.put('/profile', authenticateToken, async function(req, res, next) {
     console.error('Profile update error:', error);
     res.status(500).json({
       message: 'Error updating profile',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* 🆕 NEW: PUT /api/users/upgrade-to-owner - Upgrade user to owner role */
+router.put('/upgrade-to-owner', authenticateToken, async function(req, res, next) {
+  try {
+    // Get current user
+    const currentUser = await req.prisma.user.findUnique({
+      where: { id: req.user.userId },
+      select: { 
+        id: true, 
+        role: true, 
+        firstName: true, 
+        lastName: true, 
+        email: true,
+        isActive: true 
+      }
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({
+        message: 'User not found'
+      });
+    }
+
+    if (!currentUser.isActive) {
+      return res.status(403).json({
+        message: 'Account is not active'
+      });
+    }
+
+    if (currentUser.role === 'OWNER') {
+      return res.status(400).json({
+        message: 'User is already an owner',
+        user: currentUser
+      });
+    }
+
+    if (currentUser.role === 'ADMIN') {
+      return res.status(400).json({
+        message: 'Administrators cannot be downgraded to owner role'
+      });
+    }
+
+    if (currentUser.role !== 'USER') {
+      return res.status(400).json({
+        message: 'Only regular users can be upgraded to owner role'
+      });
+    }
+
+    // Update user role to OWNER
+    const updatedUser = await req.prisma.user.update({
+      where: { id: req.user.userId },
+      data: {
+        role: 'OWNER',
+        updatedAt: new Date()
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        phone: true,
+        avatar: true,
+        role: true,
+        isActive: true,
+        isVerified: true,
+        createdAt: true,
+        updatedAt: true
+      }
+    });
+
+    console.log(`🎉 User upgraded to owner: ${updatedUser.email} (ID: ${updatedUser.id})`);
+
+    res.json({
+      message: 'Successfully upgraded to owner account',
+      user: updatedUser,
+      newPermissions: [
+        'Create and manage camping spots',
+        'Receive and manage bookings',
+        'Access owner dashboard',
+        'View booking analytics'
+      ]
+    });
+
+  } catch (error) {
+    console.error('Upgrade to owner error:', error);
+    res.status(500).json({
+      message: 'Error upgrading to owner account',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
